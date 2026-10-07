@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Lecture Colonne FA Quantité)")
+st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Réconciliation Globale Dynamique)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -60,7 +60,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Colonne FA Quantité ERP)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Réconciliation Arithmétique)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -127,14 +127,15 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC COLONNE FA QUANTITÉ ---
+# --- ONGLET 2 : ANALYSE HT DYNAMIQUE SANS BIAIS ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Lecture Colonne FA Quantité)")
+    st.subheader("Rapprochement Financier HT (Cohérence Dynamique Global ERP vs Annexes)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Traitement sur colonne FA (Nombre d'unités) et {nb_annexes} annexes..."):
+            with st.spinner(f"Réconciliation arithmétique globale sur {nb_annexes} annexes..."):
                 try:
+                    # Table de correspondance Tiers
                     client_map = {}
                     if fichier_ref:
                         xls_ref = pd.ExcelFile(fichier_ref)
@@ -151,11 +152,6 @@ with onglet_ht:
                                     m = re.match(r'^([A-Za-z0-9_\-]+)', val)
                                     if m:
                                         client_map[m.group(1).lower()] = artis_code
-
-                    tot_toolip = 15324.15
-                    tot_sokatel = 10874.99
-                    tot_nextphone = 1981.41
-                    tot_fournisseurs = tot_toolip + tot_sokatel + tot_nextphone
 
                     df_artis = pd.read_excel(fichier_artis)
                     
@@ -175,10 +171,6 @@ with onglet_ht:
                     df_artis_abonn['Name_Client_Clean'] = df_artis_abonn['Raison sociale client'].apply(clean_string_fuzzy)
                     df_artis_abonn['Param_Key'] = df_artis_abonn['Libellé RFC'].apply(extract_param_key)
 
-                    tot_simulation_artis = 27787.45
-                    ecart_global = tot_simulation_artis - tot_fournisseurs
-
-                    # EXTRACTION CIBLÉE SUR LA COLONNE FA (Nombre d'unités)
                     col_qte_fa = next((c for c in df_artis_abonn.columns if 'ABONNEMENT' in c and 'Nombre' in c), None)
                     if not col_qte_fa:
                         col_qte_fa = next((c for c in df_artis_abonn.columns if any(k in c.lower() for k in ['nb bien', 'quantité', 'nb_bien', 'qte'])), None)
@@ -268,28 +260,15 @@ with onglet_ht:
                         Annexe_Source=('Annexe_Source', lambda x: ', '.join(set(x)))
                     )
                     
-                    df_recon_1 = pd.merge(
+                    # JOINTURE TOTALE SANS PERTE (OUTER JOIN)
+                    df_recon = pd.merge(
                         df_artis_abonn, 
                         df_fourn, 
                         left_on=['Code_Client_Str', 'Code_Article_ERP', 'Param_Key'], 
                         right_on=['Code_Client_Resolu', 'Code_Article_ERP', 'Param_Key'], 
-                        how='left'
+                        how='outer'
                     )
-
-                    unmatched_mask = df_recon_1['Montant_Sewan'].isna()
-                    if unmatched_mask.any():
-                        df_unmatched = df_recon_1[unmatched_mask].drop(columns=['Code_Client_Resolu', 'Name_Sewan_Clean', 'Montant_Sewan', 'Quantite_Sewan', 'Client_Sewan_Raw', 'Annexe_Source'], errors='ignore')
-                        df_recon_2 = pd.merge(
-                            df_unmatched,
-                            df_fourn,
-                            left_on=['Name_Client_Clean', 'Code_Article_ERP', 'Param_Key'],
-                            right_on=['Name_Sewan_Clean', 'Code_Article_ERP', 'Param_Key'],
-                            how='left'
-                        )
-                        df_recon = pd.concat([df_recon_1[~unmatched_mask], df_recon_2], ignore_index=True)
-                    else:
-                        df_recon = df_recon_1.copy()
-
+                    
                     df_recon['Montant_ERP'] = df_recon['Montant_ERP'].fillna(0.0).round(2)
                     df_recon['Montant_Sewan'] = df_recon['Montant_Sewan'].fillna(0.0).round(2)
                     df_recon['Quantite_ERP'] = df_recon['Quantite_ERP'].fillna(0.0)
@@ -314,29 +293,34 @@ with onglet_ht:
                     if 'Client_Sewan_Raw' in df_recon.columns:
                         df_recon['Raison sociale client'] = df_recon['Raison sociale client'].fillna(df_recon['Client_Sewan_Raw'])
 
-                    # --- SYNTHÈSE EXÉCUTIVE METRIQUES ---
+                    # CALCUL DYNAMIQUE ET ARITHMÉTIQUE DES TOTALS EXÉCUTIFS
+                    tot_simulation_artis_reel = df_recon['Montant_ERP'].sum()
+                    tot_fournisseurs_reel = df_recon['Montant_Sewan'].sum()
+                    ecart_global_reel = tot_simulation_artis_reel - tot_fournisseurs_reel
+
+                    # --- SYNTHÈSE EXÉCUTIVE METRIQUES DYNAMIQUE ---
                     st.markdown("### 📋 Synthèse des Factures Fournisseurs (Abonnements HT)")
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Toolip", f"{tot_toolip:,.2f} €")
-                    c2.metric("Sokatel", f"{tot_sokatel:,.2f} €")
-                    c3.metric("Nextphone", f"{tot_nextphone:,.2f} €")
-                    c4.metric("Total 3 Factures Sewan", f"{tot_fournisseurs:,.2f} €")
+                    c1.metric("Toolip (Réparti)", f"{df_recon[df_recon['Annexe_Source'].str.contains('CL200923', na=False)]['Montant_Sewan'].sum():,.2f} €")
+                    c2.metric("Sokatel (Réparti)", f"{df_recon[df_recon['Annexe_Source'].str.contains('CL201070', na=False)]['Montant_Sewan'].sum():,.2f} €")
+                    c3.metric("Nextphone (Réparti)", f"{df_recon[df_recon['Annexe_Source'].str.contains('CL201550', na=False)]['Montant_Sewan'].sum():,.2f} €")
+                    c4.metric("Total Reçu Annexes Sewan", f"{tot_fournisseurs_reel:,.2f} €")
 
-                    st.markdown("### 🧮 Comparatif Global ERP vs Fournisseurs")
+                    st.markdown("### 🧮 Comparatif Global ERP vs Fournisseurs (Reconstitution Reelle)")
                     k1, k2, k3 = st.columns(3)
-                    k1.metric("Simulation Achat Artis ERP", f"{tot_simulation_artis:,.2f} €")
-                    k2.metric("Total Factures Sewan", f"{tot_fournisseurs:,.2f} €")
+                    k1.metric("Total ERP Extrait (Sewan)", f"{tot_simulation_artis_reel:,.2f} €")
+                    k2.metric("Total Réconcilié Annexes Sewan", f"{tot_fournisseurs_reel:,.2f} €")
                     
-                    if abs(ecart_global) < 1000.0:
-                        k3.metric("Écart Net Global HT", f"{ecart_global:,.2f} €", delta="🟢 Conforme (< 1 000 €)", delta_color="normal")
+                    if abs(ecart_global_reel) < 1000.0:
+                        k3.metric("Écart Net Global HT", f"{ecart_global_reel:,.2f} €", delta="🟢 Conforme (< 1 000 €)", delta_color="normal")
                     else:
-                        k3.metric("Écart Net Global HT", f"{ecart_global:,.2f} €", delta="🟠 À expertiser (> 1 000 €)", delta_color="inverse")
+                        k3.metric("Écart Net Global HT", f"{ecart_global_reel:,.2f} €", delta="🟠 À expertiser (> 1 000 €)", delta_color="inverse")
 
                     st.markdown("---")
                     st.markdown("### 📊 Répartition Financière & Pourcentages par Diagnostic")
                     
                     total_lignes = len(df_recon)
-                    total_sewan_sum = df_recon['Montant_Sewan'].sum() if df_recon['Montant_Sewan'].sum() > 0 else 1.0
+                    total_sewan_sum = tot_fournisseurs_reel if tot_fournisseurs_reel > 0 else 1.0
 
                     diag_stats_full = df_recon.groupby('Diagnostic_RAF').agg(
                         Nombre_Lignes=('Diagnostic_RAF', 'count'),
