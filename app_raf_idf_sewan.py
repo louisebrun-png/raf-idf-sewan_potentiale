@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Extraction Param1/Param2 & Isolation -F)")
+st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Cascade Tiers Strict 1->2->3)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -44,10 +44,10 @@ def extract_param_key(text):
         return m_id.group(1).lower()
     return text_clean.strip()
 
-def extract_client_from_params(p1, p2):
-    """ Extrait le code client (ex: sk0061, sk0049) depuis Param1 ou Param2 si la colonne client est vide """
-    combined = f"{str(p1)} {str(p2)}".lower()
-    m = re.search(r'(sk\d{4}|to_cl\d+|nm\d+|ns_\d+|\d{5,6})', combined)
+def extract_code_from_string(text):
+    if not isinstance(text, str) or pd.isna(text):
+        return ""
+    m = re.search(r'(sk\d{4}|to_cl\d+|nm\d+|ns_\d+|\d{5,6})', str(text).lower())
     return m.group(1).upper() if m else ""
 
 def lire_csv_securise(fichier):
@@ -60,7 +60,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Recherche Tiers Param1/Param2)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Cascade Tiers 1->2->3)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -127,15 +127,15 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC PARSING AVANCÉ PARAM1 / PARAM2 ---
+# --- ONGLET 2 : ANALYSE HT AVEC CASCADE TIERS STRICTE ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Détail Tiers Param1/Param2 & Isolation -F)")
+    st.subheader("Rapprochement Financier HT (Cascade Tiers : Table ➔ Nom ➔ Param1/Param2)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Parsing avancé des Tiers dans Param1/Param2 sur {nb_annexes} annexes..."):
+            with st.spinner(f"Traitement en cascade Tiers sur {nb_annexes} annexes..."):
                 try:
-                    # 1. Table de correspondance Tiers
+                    # 1. Chargement Table de correspondance
                     client_map = {}
                     if fichier_ref:
                         xls_ref = pd.ExcelFile(fichier_ref)
@@ -153,36 +153,29 @@ with onglet_ht:
                                     if m:
                                         client_map[m.group(1).lower()] = artis_code
 
-                    def resoudre_code_client_artis(cli_raw, p1="", p2=""):
-                        if isinstance(cli_raw, str) and str(cli_raw).strip() not in ['', 'nan', 'None', '-']:
-                            c_str = str(cli_raw).strip()
-                            if c_str.lower() in client_map:
-                                return client_map[c_str.lower()]
-                            m = re.match(r'^([A-Za-z0-9_\-]+)', c_str)
-                            if m and m.group(1).lower() in client_map:
-                                return client_map[m.group(1).lower()]
-                        # Tente de chercher le code client dans Param1 / Param2 (ex: sk0061, sk0049)
-                        extracted = extract_client_from_params(p1, p2)
-                        if extracted and extracted.lower() in client_map:
-                            return client_map[extracted.lower()]
-                        return extracted if extracted else (str(cli_raw).strip() if pd.notna(cli_raw) else "")
-
                     tot_toolip = 15324.15
                     tot_sokatel = 10874.99
                     tot_nextphone = 1981.41
                     tot_fournisseurs = tot_toolip + tot_sokatel + tot_nextphone
 
                     df_artis = pd.read_excel(fichier_artis)
+                    
+                    # Filtre strict SEWAN sur le fournisseur ERP
+                    col_fourn_artis = next((c for c in df_artis.columns if 'ABONNEMENT' in c and ('fournisseur' in c.lower() or 'raison soc' in c.lower() or 'org' in c.lower())), None)
+                    if col_fourn_artis:
+                        df_artis = df_artis[df_artis[col_fourn_artis].astype(str).str.contains('SEWAN', case=False, na=False)].copy()
+
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
                     df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
-                    
-                    # Isolation des articles abonnements récurrents (exclut les régularisations -F ponctuelles)
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
+                    
+                    # Isolation des articles récurrents (exclut -F)
                     df_artis_abonn = df_artis_abonn[~df_artis_abonn['Code_Article_ERP'].str.endswith('-F')].copy()
 
                     col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis_abonn.columns else df_artis.columns[1]
                     df_artis_abonn['Montant_ERP'] = df_artis_abonn[col_m_artis].fillna(0.0)
                     df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip()
+                    df_artis_abonn['Name_Client_Clean'] = df_artis_abonn['Raison sociale client'].apply(clean_string_fuzzy)
                     df_artis_abonn['Param_Key'] = df_artis_abonn['Libellé RFC'].apply(extract_param_key)
 
                     tot_simulation_artis = 27787.45
@@ -218,8 +211,6 @@ with onglet_ht:
                         
                         for _, row in df_annexe.iterrows():
                             ref = isoler_ref_article(str(row[col_ref]))
-                            
-                            # Filtre : on ignore les frais ponctuels -F dans le stock d'abonnements mensuels
                             if ref.endswith('-F'):
                                 continue
 
@@ -233,20 +224,37 @@ with onglet_ht:
                             except ValueError:
                                 q_sewan = 1.0
                             
-                            cli_raw = ""
-                            if col_cli1 and pd.notna(row[col_cli1]) and str(row[col_cli1]).strip() not in ['', 'nan', '-']:
-                                cli_raw = str(row[col_cli1]).strip()
-                            elif col_cli2 and pd.notna(row[col_cli2]) and str(row[col_cli2]).strip() not in ['', 'nan', '-']:
-                                cli_raw = str(row[col_cli2]).strip()
-                                
+                            c1_str = str(row[col_cli1]).strip() if col_cli1 and pd.notna(row[col_cli1]) else ""
+                            c2_str = str(row[col_cli2]).strip() if col_cli2 and pd.notna(row[col_cli2]) else ""
                             p1_val = str(row[col_param1]) if col_param1 else ""
                             p2_val = str(row[col_param2]) if col_param2 else ""
                             
-                            code_client_resolu = resoudre_code_client_artis(cli_raw, p1_val, p2_val)
+                            # RESOLUTION DE LA CASCADE TIERS (1 -> 2 -> 3)
+                            res_code = ""
+                            # 1. Table de correspondance Excel
+                            for test_val in [c1_str, c2_str, p1_val, p2_val]:
+                                if test_val.lower() in client_map:
+                                    res_code = client_map[test_val.lower()]
+                                    break
+                                token = extract_code_from_string(test_val)
+                                if token and token.lower() in client_map:
+                                    res_code = client_map[token.lower()]
+                                    break
+                                    
+                            # 2. Token direct du Tiers s'il est au format connu
+                            if not res_code:
+                                for test_val in [c1_str, c2_str, p1_val, p2_val]:
+                                    token = extract_code_from_string(test_val)
+                                    if token:
+                                        res_code = token
+                                        break
+                                        
+                            cli_raw = c1_str if c1_str else (c2_str if c2_str else p1_val)
                             param_key = extract_param_key(p1_val)
                             
                             lignes_fourn.append({
-                                'Code_Client_Resolu': code_client_resolu,
+                                'Code_Client_Resolu': res_code,
+                                'Name_Sewan_Clean': clean_string_fuzzy(cli_raw),
                                 'Code_Article_ERP': ref,
                                 'Param_Key': param_key,
                                 'Montant_Sewan': m_ht,
@@ -255,21 +263,37 @@ with onglet_ht:
                                 'Annexe_Source': annexe.name
                             })
                             
-                    df_fourn = pd.DataFrame(lignes_fourn).groupby(['Code_Client_Resolu', 'Code_Article_ERP', 'Param_Key'], as_index=False).agg(
+                    df_fourn = pd.DataFrame(lignes_fourn).groupby(['Code_Client_Resolu', 'Name_Sewan_Clean', 'Code_Article_ERP', 'Param_Key'], as_index=False).agg(
                         Montant_Sewan=('Montant_Sewan', 'sum'),
                         Quantite_Sewan=('Quantite_Sewan', 'sum'),
                         Client_Sewan_Raw=('Client_Sewan_Raw', 'first'),
                         Annexe_Source=('Annexe_Source', lambda x: ', '.join(set(x)))
                     )
                     
-                    df_recon = pd.merge(
+                    # Rapprochement Niveau 1 : par Code Client Résolu
+                    df_recon_1 = pd.merge(
                         df_artis_abonn, 
                         df_fourn, 
                         left_on=['Code_Client_Str', 'Code_Article_ERP', 'Param_Key'], 
                         right_on=['Code_Client_Resolu', 'Code_Article_ERP', 'Param_Key'], 
-                        how='outer'
+                        how='left'
                     )
-                    
+
+                    # Rapprochement Niveau 2 : par Raison Sociale nettoyée pour les non-matchés
+                    unmatched_mask = df_recon_1['Montant_Sewan'].isna()
+                    if unmatched_mask.any():
+                        df_unmatched = df_recon_1[unmatched_mask].drop(columns=['Code_Client_Resolu', 'Name_Sewan_Clean', 'Montant_Sewan', 'Quantite_Sewan', 'Client_Sewan_Raw', 'Annexe_Source'], errors='ignore')
+                        df_recon_2 = pd.merge(
+                            df_unmatched,
+                            df_fourn,
+                            left_on=['Name_Client_Clean', 'Code_Article_ERP', 'Param_Key'],
+                            right_on=['Name_Sewan_Clean', 'Code_Article_ERP', 'Param_Key'],
+                            how='left'
+                        )
+                        df_recon = pd.concat([df_recon_1[~unmatched_mask], df_recon_2], ignore_index=True)
+                    else:
+                        df_recon = df_recon_1.copy()
+
                     df_recon['Montant_ERP'] = df_recon['Montant_ERP'].fillna(0.0).round(2)
                     df_recon['Montant_Sewan'] = df_recon['Montant_Sewan'].fillna(0.0).round(2)
                     df_recon['Quantite_ERP'] = df_recon['Quantite_ERP'].fillna(0.0)
