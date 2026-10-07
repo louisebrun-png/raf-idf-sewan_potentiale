@@ -291,4 +291,74 @@ with onglet_ht:
 
                     if 'Code_Client_Resolu' in df_recon.columns:
                         df_recon['Code client'] = df_recon['Code client'].fillna(df_recon['Code_Client_Resolu'])
-                    if 'Client
+                    if 'Client_Sewan_Raw' in df_recon.columns:
+                        df_recon['Raison sociale client'] = df_recon['Raison sociale client'].fillna(df_recon['Client_Sewan_Raw'])
+
+                    # --- SYNTHÈSE EXÉCUTIVE METRIQUES ---
+                    st.markdown("### 📋 Synthèse des Factures Fournisseurs (Abonnements HT)")
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Toolip", f"{tot_toolip:,.2f} €")
+                    c2.metric("Sokatel", f"{tot_sokatel:,.2f} €")
+                    c3.metric("Nextphone", f"{tot_nextphone:,.2f} €")
+                    c4.metric("Total 3 Factures Sewan", f"{tot_fournisseurs:,.2f} €")
+
+                    st.markdown("### 🧮 Comparatif Global ERP vs Fournisseurs")
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("Simulation Achat Artis ERP", f"{tot_simulation_artis:,.2f} €")
+                    k2.metric("Total Factures Sewan", f"{tot_fournisseurs:,.2f} €")
+                    
+                    if abs(ecart_global) < 1000.0:
+                        k3.metric("Écart Net Global HT", f"{ecart_global:,.2f} €", delta="🟢 Conforme (< 1 000 €)", delta_color="normal")
+                    else:
+                        k3.metric("Écart Net Global HT", f"{ecart_global:,.2f} €", delta="🟠 À expertiser (> 1 000 €)", delta_color="inverse")
+
+                    st.markdown("---")
+                    st.markdown("### 📊 Répartition Financière & Pourcentages par Diagnostic")
+                    
+                    total_lignes = len(df_recon)
+                    total_sewan_sum = df_recon['Montant_Sewan'].sum() if df_recon['Montant_Sewan'].sum() > 0 else 1.0
+
+                    diag_stats_full = df_recon.groupby('Diagnostic_RAF').agg(
+                        Nombre_Lignes=('Diagnostic_RAF', 'count'),
+                        Total_Artis_ERP=('Montant_ERP', 'sum'),
+                        Total_Sewan_Fournisseur=('Montant_Sewan', 'sum'),
+                        Total_Ecart_HT=('Ecart_HT', 'sum')
+                    ).reset_index()
+
+                    diag_stats_full['% Lignes'] = ((diag_stats_full['Nombre_Lignes'] / total_lignes) * 100).round(1).astype(str) + " %"
+                    diag_stats_full['% HT Sewan'] = ((diag_stats_full['Total_Sewan_Fournisseur'] / total_sewan_sum) * 100).round(1).astype(str) + " %"
+
+                    st.dataframe(diag_stats_full[['Diagnostic_RAF', 'Nombre_Lignes', '% Lignes', 'Total_Artis_ERP', 'Total_Sewan_Fournisseur', '% HT Sewan', 'Total_Ecart_HT']], use_container_width=True)
+
+                    col_chart, col_empty = st.columns([1, 1])
+                    with col_chart:
+                        st.markdown("### 🍕 Répartition (%) des Lignes d'Abonnements")
+                        st.bar_chart(df_recon['Diagnostic_RAF'].value_counts(normalize=True) * 100)
+
+                    st.markdown("---")
+                    st.markdown("### 🔍 Tableau Détaillé des Lignes d'Abonnements")
+
+                    if 'Raison sociale client' in df_recon.columns:
+                        df_recon['Raison sociale client'] = df_recon['Raison sociale client'].astype(str).str.slice(0, 20)
+                        
+                    cols_export_ht = [
+                        'Code client', 'Raison sociale client', 'Code SSC', 'Code RFC', 'Libellé RFC', 
+                        'Code_Article_ERP', 'Quantite_ERP', 'Quantite_Sewan', 
+                        'Montant_ERP', 'Montant_Sewan', 'Ecart_HT', 'Diagnostic_RAF', 'Annexe_Source'
+                    ]
+                    for c in cols_export_ht:
+                        if c not in df_recon.columns:
+                            df_recon[c] = "Non renseigné"
+                            
+                    df_res_ht = df_recon[cols_export_ht].drop_duplicates()
+                    
+                    buffer_ht = io.BytesIO()
+                    with pd.ExcelWriter(buffer_ht, engine='openpyxl') as writer:
+                        df_res_ht.to_excel(writer, index=False, sheet_name='Analyse_HT_Client_Article')
+                    
+                    st.dataframe(df_res_ht, use_container_width=True)
+                    st.download_button("📥 Télécharger l'Analyse HT Détaillée (.xlsx)", data=buffer_ht.getvalue(), file_name="Analyse_RAF_HT_Detaillee.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+                except Exception as e:
+                    st.error(f"Erreur pendant le traitement HT : {e}")
+    else:
+        st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les annexes CSV / Excel.")
