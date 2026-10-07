@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Traçabilité Source Annexe)")
+st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Extraction Param1/Param2 & Isolation -F)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -44,6 +44,12 @@ def extract_param_key(text):
         return m_id.group(1).lower()
     return text_clean.strip()
 
+def extract_client_from_params(p1, p2):
+    """ Extrait le code client (ex: sk0061, sk0049) depuis Param1 ou Param2 si la colonne client est vide """
+    combined = f"{str(p1)} {str(p2)}".lower()
+    m = re.search(r'(sk\d{4}|to_cl\d+|nm\d+|ns_\d+|\d{5,6})', combined)
+    return m.group(1).upper() if m else ""
+
 def lire_csv_securise(fichier):
     for enc in ['latin1', 'iso-8859-1', 'cp1252', 'utf-8']:
         try:
@@ -54,7 +60,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Détail Tiers & Annexes)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Recherche Tiers Param1/Param2)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -121,13 +127,13 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC TRACABILITÉ DES ANNEXES SOURCES ---
+# --- ONGLET 2 : ANALYSE HT AVEC PARSING AVANCÉ PARAM1 / PARAM2 ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Détail Tiers & Annexes Sources)")
+    st.subheader("Rapprochement Financier HT (Détail Tiers Param1/Param2 & Isolation -F)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Chargement de la table de correspondance Tiers et réconciliation de {nb_annexes} annexes..."):
+            with st.spinner(f"Parsing avancé des Tiers dans Param1/Param2 sur {nb_annexes} annexes..."):
                 try:
                     # 1. Table de correspondance Tiers
                     client_map = {}
@@ -147,17 +153,19 @@ with onglet_ht:
                                     if m:
                                         client_map[m.group(1).lower()] = artis_code
 
-                    def resoudre_code_client_artis(cli_raw):
-                        if not isinstance(cli_raw, str) or pd.isna(cli_raw) or str(cli_raw).strip() in ['', 'nan', 'None', '-']:
-                            return ""
-                        c_str = str(cli_raw).strip()
-                        c_lower = c_str.lower()
-                        if c_lower in client_map:
-                            return client_map[c_lower]
-                        m = re.match(r'^([A-Za-z0-9_\-]+)', c_str)
-                        if m and m.group(1).lower() in client_map:
-                            return client_map[m.group(1).lower()]
-                        return c_str
+                    def resoudre_code_client_artis(cli_raw, p1="", p2=""):
+                        if isinstance(cli_raw, str) and str(cli_raw).strip() not in ['', 'nan', 'None', '-']:
+                            c_str = str(cli_raw).strip()
+                            if c_str.lower() in client_map:
+                                return client_map[c_str.lower()]
+                            m = re.match(r'^([A-Za-z0-9_\-]+)', c_str)
+                            if m and m.group(1).lower() in client_map:
+                                return client_map[m.group(1).lower()]
+                        # Tente de chercher le code client dans Param1 / Param2 (ex: sk0061, sk0049)
+                        extracted = extract_client_from_params(p1, p2)
+                        if extracted and extracted.lower() in client_map:
+                            return client_map[extracted.lower()]
+                        return extracted if extracted else (str(cli_raw).strip() if pd.notna(cli_raw) else "")
 
                     tot_toolip = 15324.15
                     tot_sokatel = 10874.99
@@ -167,7 +175,11 @@ with onglet_ht:
                     df_artis = pd.read_excel(fichier_artis)
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
                     df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
+                    
+                    # Isolation des articles abonnements récurrents (exclut les régularisations -F ponctuelles)
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
+                    df_artis_abonn = df_artis_abonn[~df_artis_abonn['Code_Article_ERP'].str.endswith('-F')].copy()
+
                     col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis_abonn.columns else df_artis.columns[1]
                     df_artis_abonn['Montant_ERP'] = df_artis_abonn[col_m_artis].fillna(0.0)
                     df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip()
@@ -191,8 +203,8 @@ with onglet_ht:
                         idx_m = next((i for i, c in enumerate(cols) if any(k in c for k in ["prix d'achat", 'prix', 'montant', 'ht'])), 1)
                         idx_qte = next((i for i, c in enumerate(cols) if any(k in c for k in ['quantité', 'quantite', 'qte'])), -1)
                         idx_p1 = next((i for i, c in enumerate(cols) if 'param1' in c), -1)
+                        idx_p2 = next((i for i, c in enumerate(cols) if 'param2' in c), -1)
                         
-                        # Exploration multi-colonnes pour trouver le Tiers dans l'annexe
                         idx_cli1 = next((i for i, c in enumerate(cols) if 'client/revendeur direct (niv. 1)' in c or 'client/revendeur' in c), -1)
                         idx_cli2 = next((i for i, c in enumerate(cols) if 'nom client niveau 2' in c or 'nom client' in c), -1)
                         
@@ -200,12 +212,17 @@ with onglet_ht:
                         col_montant = df_annexe.columns[idx_m]
                         col_qte = df_annexe.columns[idx_qte] if idx_qte != -1 else None
                         col_param1 = df_annexe.columns[idx_p1] if idx_p1 != -1 else None
-                        
+                        col_param2 = df_annexe.columns[idx_p2] if idx_p2 != -1 else None
                         col_cli1 = df_annexe.columns[idx_cli1] if idx_cli1 != -1 else None
                         col_cli2 = df_annexe.columns[idx_cli2] if idx_cli2 != -1 else None
                         
                         for _, row in df_annexe.iterrows():
                             ref = isoler_ref_article(str(row[col_ref]))
+                            
+                            # Filtre : on ignore les frais ponctuels -F dans le stock d'abonnements mensuels
+                            if ref.endswith('-F'):
+                                continue
+
                             try:
                                 m_ht = float(str(row[col_montant]).replace(',', '.').replace(' ', '').replace('€', ''))
                             except ValueError:
@@ -216,15 +233,16 @@ with onglet_ht:
                             except ValueError:
                                 q_sewan = 1.0
                             
-                            # Prise d'information client en cascades
                             cli_raw = ""
                             if col_cli1 and pd.notna(row[col_cli1]) and str(row[col_cli1]).strip() not in ['', 'nan', '-']:
                                 cli_raw = str(row[col_cli1]).strip()
                             elif col_cli2 and pd.notna(row[col_cli2]) and str(row[col_cli2]).strip() not in ['', 'nan', '-']:
                                 cli_raw = str(row[col_cli2]).strip()
                                 
-                            code_client_resolu = resoudre_code_client_artis(cli_raw)
                             p1_val = str(row[col_param1]) if col_param1 else ""
+                            p2_val = str(row[col_param2]) if col_param2 else ""
+                            
+                            code_client_resolu = resoudre_code_client_artis(cli_raw, p1_val, p2_val)
                             param_key = extract_param_key(p1_val)
                             
                             lignes_fourn.append({
@@ -234,7 +252,7 @@ with onglet_ht:
                                 'Montant_Sewan': m_ht,
                                 'Quantite_Sewan': q_sewan,
                                 'Client_Sewan_Raw': cli_raw,
-                                'Annexe_Source': annexe.name  # Traçabilité du fichier
+                                'Annexe_Source': annexe.name
                             })
                             
                     df_fourn = pd.DataFrame(lignes_fourn).groupby(['Code_Client_Resolu', 'Code_Article_ERP', 'Param_Key'], as_index=False).agg(
@@ -273,74 +291,4 @@ with onglet_ht:
 
                     if 'Code_Client_Resolu' in df_recon.columns:
                         df_recon['Code client'] = df_recon['Code client'].fillna(df_recon['Code_Client_Resolu'])
-                    if 'Client_Sewan_Raw' in df_recon.columns:
-                        df_recon['Raison sociale client'] = df_recon['Raison sociale client'].fillna(df_recon['Client_Sewan_Raw'])
-
-                    # --- SYNTHÈSE EXÉCUTIVE METRIQUES ---
-                    st.markdown("### 📋 Synthèse des Factures Fournisseurs (Abonnements HT)")
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Toolip", f"{tot_toolip:,.2f} €")
-                    c2.metric("Sokatel", f"{tot_sokatel:,.2f} €")
-                    c3.metric("Nextphone", f"{tot_nextphone:,.2f} €")
-                    c4.metric("Total 3 Factures Sewan", f"{tot_fournisseurs:,.2f} €")
-
-                    st.markdown("### 🧮 Comparatif Global ERP vs Fournisseurs")
-                    k1, k2, k3 = st.columns(3)
-                    k1.metric("Simulation Achat Artis ERP", f"{tot_simulation_artis:,.2f} €")
-                    k2.metric("Total Factures Sewan", f"{tot_fournisseurs:,.2f} €")
-                    
-                    if abs(ecart_global) < 1000.0:
-                        k3.metric("Écart Net Global HT", f"{ecart_global:,.2f} €", delta="🟢 Conforme (< 1 000 €)", delta_color="normal")
-                    else:
-                        k3.metric("Écart Net Global HT", f"{ecart_global:,.2f} €", delta="🟠 À expertiser (> 1 000 €)", delta_color="inverse")
-
-                    st.markdown("---")
-                    st.markdown("### 📊 Répartition Financière & Pourcentages par Diagnostic")
-                    
-                    total_lignes = len(df_recon)
-                    total_sewan_sum = df_recon['Montant_Sewan'].sum() if df_recon['Montant_Sewan'].sum() > 0 else 1.0
-
-                    diag_stats_full = df_recon.groupby('Diagnostic_RAF').agg(
-                        Nombre_Lignes=('Diagnostic_RAF', 'count'),
-                        Total_Artis_ERP=('Montant_ERP', 'sum'),
-                        Total_Sewan_Fournisseur=('Montant_Sewan', 'sum'),
-                        Total_Ecart_HT=('Ecart_HT', 'sum')
-                    ).reset_index()
-
-                    diag_stats_full['% Lignes'] = ((diag_stats_full['Nombre_Lignes'] / total_lignes) * 100).round(1).astype(str) + " %"
-                    diag_stats_full['% HT Sewan'] = ((diag_stats_full['Total_Sewan_Fournisseur'] / total_sewan_sum) * 100).round(1).astype(str) + " %"
-
-                    st.dataframe(diag_stats_full[['Diagnostic_RAF', 'Nombre_Lignes', '% Lignes', 'Total_Artis_ERP', 'Total_Sewan_Fournisseur', '% HT Sewan', 'Total_Ecart_HT']], use_container_width=True)
-
-                    col_chart, col_empty = st.columns([1, 1])
-                    with col_chart:
-                        st.markdown("### 🍕 Répartition (%) des Lignes d'Abonnements")
-                        st.bar_chart(df_recon['Diagnostic_RAF'].value_counts(normalize=True) * 100)
-
-                    st.markdown("---")
-                    st.markdown("### 🔍 Tableau Détaillé des Lignes d'Abonnements (avec Fichier Source)")
-
-                    if 'Raison sociale client' in df_recon.columns:
-                        df_recon['Raison sociale client'] = df_recon['Raison sociale client'].astype(str).str.slice(0, 20)
-                        
-                    cols_export_ht = [
-                        'Code client', 'Raison sociale client', 'Code SSC', 'Code RFC', 'Libellé RFC', 
-                        'Code_Article_ERP', 'Quantite_ERP', 'Quantite_Sewan', 
-                        'Montant_ERP', 'Montant_Sewan', 'Ecart_HT', 'Diagnostic_RAF', 'Annexe_Source'
-                    ]
-                    for c in cols_export_ht:
-                        if c not in df_recon.columns:
-                            df_recon[c] = "Non renseigné"
-                            
-                    df_res_ht = df_recon[cols_export_ht].drop_duplicates()
-                    
-                    buffer_ht = io.BytesIO()
-                    with pd.ExcelWriter(buffer_ht, engine='openpyxl') as writer:
-                        df_res_ht.to_excel(writer, index=False, sheet_name='Analyse_HT_Client_Article')
-                    
-                    st.dataframe(df_res_ht, use_container_width=True)
-                    st.download_button("📥 Télécharger l'Analyse HT Détaillée (.xlsx)", data=buffer_ht.getvalue(), file_name="Analyse_RAF_HT_Detaillee.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
-                except Exception as e:
-                    st.error(f"Erreur pendant le traitement HT : {e}")
-    else:
-        st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les annexes CSV / Excel.")
+                    if 'Client
