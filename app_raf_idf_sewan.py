@@ -18,7 +18,7 @@ st.sidebar.header("📁 Importation des Documents")
 fichier_artis = st.sidebar.file_uploader("1. Simulation Achat Artis (.xlsx)", type=["xlsx"])
 fichier_ref = st.sidebar.file_uploader("2. Table de Correspondance (.xlsx)", type=["xlsx"])
 annexes_csv = st.sidebar.file_uploader("3. Annexes Fournisseurs (.csv / .xlsx)", type=["csv", "xlsx"], accept_multiple_files=True)
-factures_pdf = st.sidebar.file_uploader("4. Factures PDF Sewan (Obligatoire pour TVA)", type=["pdf"], accept_multiple_files=True)
+factures_pdf = st.sidebar.file_uploader("4. Factures PDF Sewan (Obligatoire TVA)", type=["pdf"], accept_multiple_files=True)
 
 def isoler_ref_article(libelle):
     if not isinstance(libelle, str):
@@ -27,8 +27,8 @@ def isoler_ref_article(libelle):
     return match.group(1) if match else libelle.split(' - ')[0].strip()
 
 def lire_csv_securise(fichier):
-    encodings = ['utf-8', 'iso-8859-1', 'cp1252', 'latin1']
-    for enc in encodings:
+    # Gestion des encodages Sewan (latin1 / utf-8)
+    for enc in ['latin1', 'iso-8859-1', 'cp1252', 'utf-8']:
         try:
             fichier.seek(0)
             return pd.read_csv(fichier, sep=None, engine='python', encoding=enc)
@@ -44,12 +44,17 @@ with onglet_ht:
     st.subheader("Rapprochement Financier HT (Conformes & Écarts)")
     if fichier_artis and annexes_csv:
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner("Traitement des annexes et calcul des écarts HT..."):
+            with st.spinner("Traitement des 5 annexes CSV et de la simulation Artis ERP..."):
                 try:
                     df_artis = pd.read_excel(fichier_artis)
-                    df_artis_abonn = df_artis.dropna(subset=['Coût ABONNEMENT article']).copy()
-                    df_artis_abonn['Code_Article_ERP'] = df_artis_abonn['Coût ABONNEMENT article'].apply(isoler_ref_article)
-                    df_artis_abonn['Montant_ERP'] = df_artis_abonn['Coût ABONNEMENT facturé'].fillna(0.0)
+                    
+                    # Filtrage des lignes abonnements Artis
+                    col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
+                    df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
+                    df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
+                    
+                    col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis.columns else df_artis.columns[1]
+                    df_artis_abonn['Montant_ERP'] = df_artis_abonn[col_m_artis].fillna(0.0)
                     
                     lignes_fourn = []
                     for annexe in annexes_csv:
@@ -58,15 +63,22 @@ with onglet_ht:
                         else:
                             df_annexe = pd.read_excel(annexe)
                         
-                        cols = [str(c).lower() for c in df_annexe.columns]
-                        col_ref = df_annexe.columns[next((i for i, c in enumerate(cols) if any(k in c for k in ['ref', 'code', 'article'])), 0)]
-                        col_montant = df_annexe.columns[next((i for i, c in enumerate(cols) if any(k in c for k in ['montant', 'ht', 'prix', 'total'])), 1)]
-                        col_client = df_annexe.columns[next((i for i, c in enumerate(cols) if any(k in c for k in ['client', 'raison'])), -1)]
+                        cols = [str(c).lower().strip() for c in df_annexe.columns]
+                        
+                        # Recherche souple des colonnes Sewan
+                        idx_ref = next((i for i, c in enumerate(cols) if any(k in c for k in ['code produit', 'code_article', 'ref', 'code'])), 0)
+                        idx_m = next((i for i, c in enumerate(cols) if any(k in c for k in ["prix d'achat", 'prix', 'montant', 'ht'])), 1)
+                        idx_cli = next((i for i, c in enumerate(cols) if any(k in c for k in ['nom client', 'client', 'nom utilisateur', 'description'])), -1)
+                        
+                        col_ref = df_annexe.columns[idx_ref]
+                        col_montant = df_annexe.columns[idx_m]
+                        col_client = df_annexe.columns[idx_cli]
                         
                         for _, row in df_annexe.iterrows():
                             ref = isoler_ref_article(str(row[col_ref]))
                             try:
-                                m_ht = float(str(row[col_montant]).replace(',', '.').replace(' ', '').replace('€', ''))
+                                val_str = str(row[col_montant]).replace(',', '.').replace(' ', '').replace('€', '')
+                                m_ht = float(val_str)
                             except ValueError:
                                 m_ht = 0.0
                             
@@ -83,7 +95,7 @@ with onglet_ht:
                     df_merged['Ecart'] = (df_merged['Montant_ERP'] - df_merged['Montant_Sewan']).round(2)
                     
                     def qualifier_ht(row):
-                        if pd.isna(row.get('Coût ABONNEMENT article')):
+                        if pd.isna(row.get(col_art_artis)):
                             return "🔴 Absent simulation ERP"
                         if pd.isna(row.get('Client_Sewan')):
                             return "🟠 Absent annexe fournisseur"
@@ -104,28 +116,30 @@ with onglet_ht:
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                         df_res.to_excel(writer, index=False, sheet_name='Analyse_HT')
                     
+                    st.success("Analyse HT terminée avec succès !")
                     st.dataframe(df_res, use_container_width=True)
-                    st.download_button("📥 Télécharger l'Analyse HT (.xlsx)", data=buffer.getvalue(), file_name="Analyse_RAF_HT.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+                    st.download_button("📥 Télécharger l'Analyse HT (.xlsx)", data=buffer.getvalue(), file_name="Analyse_RAF_HT_Koesio_Sewan.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
                 except Exception as e:
                     st.error(f"Erreur pendant le traitement HT : {e}")
     else:
-        st.info("👈 Veuillez charger la simulation Artis ERP et au moins une annexe CSV/Excel.")
+        st.info("👈 Charge la simulation Artis (.xlsx) et tes annexes CSV dans le menu à gauche.")
 
-# --- ONGLET 2 : AUDIT TVA (Extraction depuis PDF) ---
+# --- ONGLET 2 : AUDIT TVA (PDF) ---
 with onglet_tva:
     st.subheader("Audit Fiscale TVA (STD 20% vs APST 0%)")
     if fichier_artis and factures_pdf:
         if st.button("🚨 Lancer l'Analyse TVA", type="primary", key="btn_tva"):
-            with st.spinner("Analyse du texte des factures PDF..."):
+            with st.spinner("Parsing du texte brut des factures PDF Sewan..."):
                 try:
                     df_artis = pd.read_excel(fichier_artis)
-                    df_artis_abonn = df_artis.dropna(subset=['Coût ABONNEMENT article']).copy()
-                    df_artis_abonn['Code_Article_ERP'] = df_artis_abonn['Coût ABONNEMENT article'].apply(isoler_ref_article)
+                    col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
+                    df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
+                    df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
                     
                     def harmoniser_tva_artis(row):
                         gtva = str(row.get('Coût ABONNEMENT Gestion TVA', ''))
                         ttva = str(row.get('Coût ABONNEMENT Taux TVA', ''))
-                        return 'APST (0%)' if ('APST' in gtva or '0.00' in ttva) else 'S (20%)'
+                        return 'APST (0%)' if ('APST' in gtva or '0.00' in ttva or '0%' in ttva) else 'S (20%)'
 
                     df_artis_abonn['TVA_Artis'] = df_artis_abonn.apply(harmoniser_tva_artis, axis=1)
                     
@@ -151,13 +165,21 @@ with onglet_tva:
                     df_errors_tva = df_merged_tva[df_merged_tva['TVA_Artis'] != df_merged_tva['TVA_Sewan']].copy()
                     df_errors_tva['Diagnostic_RAF'] = "🚨 Divergence TVA"
                     
+                    cols_tva_export = ['Code client', 'Raison sociale client', 'Code SSC', 'Code RFC', 'Code_Article_ERP', 'TVA_Artis', 'TVA_Sewan', 'Diagnostic_RAF']
+                    for c in cols_tva_export:
+                        if c not in df_errors_tva.columns:
+                            df_errors_tva[c] = "Non renseigné"
+                            
+                    df_res_tva = df_errors_tva[cols_tva_export].drop_duplicates()
+                    
                     buffer_tva = io.BytesIO()
                     with pd.ExcelWriter(buffer_tva, engine='openpyxl') as writer:
-                        df_errors_tva.to_excel(writer, index=False, sheet_name='Anomalies_TVA')
+                        df_res_tva.to_excel(writer, index=False, sheet_name='Anomalies_TVA')
                     
-                    st.dataframe(df_errors_tva, use_container_width=True)
+                    st.success("Audit TVA terminé !")
+                    st.dataframe(df_res_tva, use_container_width=True)
                     st.download_button("📥 Télécharger le Rapport TVA (.xlsx)", data=buffer_tva.getvalue(), file_name="Anomalies_TVA.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
                 except Exception as e:
                     st.error(f"Erreur pendant l'analyse TVA : {e}")
     else:
-        st.info("👈 Les factures PDF Sewan sont obligatoires pour réaliser l'audit de TVA.")
+        st.info("👈 Charge les 3 factures PDF Sewan pour exécuter l'audit TVA.")
