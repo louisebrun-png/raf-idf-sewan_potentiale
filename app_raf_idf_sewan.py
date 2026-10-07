@@ -27,6 +27,17 @@ def isoler_ref_article(libelle):
     match = re.search(r'([0-9]{2}-[\d\-]+-[0-9]{2}-[MFUV])', libelle)
     return match.group(1) if match else libelle.split(' - ')[0].strip()
 
+def lire_csv_securise(fichier):
+    encodings = ['utf-8', 'iso-8859-1', 'cp1252', 'latin1']
+    for enc in encodings:
+        try:
+            fichier.seek(0)
+            return pd.read_csv(fichier, sep=None, engine='python', encoding=enc)
+        except (UnicodeDecodeError, Exception):
+            continue
+    fichier.seek(0)
+    return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
+
 onglet_ht, onglet_tva = st.tabs(["📊 1. Analyse Quantité & Prix HT (Global)", "🚨 2. Audit Écarts TVA"])
 
 if fichier_artis and (annexes_csv or factures_pdf):
@@ -43,17 +54,17 @@ if fichier_artis and (annexes_csv or factures_pdf):
                 
                 lignes_fourn = []
                 
-                # Traitement de TOUTES les annexes CSV/Excel chargées
+                # Traitement de TOUTES les annexes CSV/Excel chargées avec secours encodage
                 if annexes_csv:
                     for annexe in annexes_csv:
                         if annexe.name.endswith('.csv'):
-                            df_annexe = pd.read_csv(annexe, sep=None, engine='python')
+                            df_annexe = lire_csv_securise(annexe)
                         else:
                             df_annexe = pd.read_excel(annexe)
                         
-                        col_ref = next((c for c in df_annexe.columns if any(k in c.lower() for k in ['ref', 'code', 'article'])), df_annexe.columns[0])
-                        col_montant = next((c for c in df_annexe.columns if any(k in c.lower() for k in ['montant', 'ht', 'prix', 'total'])), df_annexe.columns[1])
-                        col_client = next((c for c in df_annexe.columns if any(k in c.lower() for k in ['client', 'raison'])), df_annexe.columns[-1])
+                        col_ref = next((c for c in df_annexe.columns if any(k in str(c).lower() for k in ['ref', 'code', 'article'])), df_annexe.columns[0])
+                        col_montant = next((c for c in df_annexe.columns if any(k in str(c).lower() for k in ['montant', 'ht', 'prix', 'total'])), df_annexe.columns[1])
+                        col_client = next((c for c in df_annexe.columns if any(k in str(c).lower() for k in ['client', 'raison'])), df_annexe.columns[-1])
                         
                         for _, row in df_annexe.iterrows():
                             ref = isoler_ref_article(str(row[col_ref]))
@@ -211,4 +222,3 @@ if fichier_artis and (annexes_csv or factures_pdf):
                 )
 else:
     st.info("👈 Veuillez charger la simulation Artis ERP ainsi que les annexes CSV (ou les PDF) dans le menu latéral pour démarrer.")
-    
