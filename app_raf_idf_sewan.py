@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Abonnements)")
+st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Abonnements Payants)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -110,26 +110,24 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT ET SYNTHÈSE EXÉCUTIVE ---
+# --- ONGLET 2 : ANALYSE HT ---
 with onglet_ht:
     st.subheader("Rapprochement Financier HT (Synthèse & Détail)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Traitement des {nb_annexes} annexes CSV/Excel et extraction des synthèses..."):
+            with st.spinner(f"Traitement des {nb_annexes} annexes CSV/Excel et réconciliation..."):
                 try:
-                    # Totaux fixes des factures PDF de référence
                     tot_toolip = 15324.15
                     tot_sokatel = 10874.99
                     tot_nextphone = 1981.41
                     tot_fournisseurs = tot_toolip + tot_sokatel + tot_nextphone
 
-                    # Lecture Artis ERP
                     df_artis = pd.read_excel(fichier_artis)
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
                     df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
-                    col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis.columns else df_artis.columns[1]
+                    col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis_abonn.columns else df_artis.columns[1]
                     df_artis_abonn['Montant_ERP'] = df_artis_abonn[col_m_artis].fillna(0.0)
                     df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip()
                     
@@ -150,7 +148,15 @@ with onglet_ht:
                         idx_ref = next((i for i, c in enumerate(cols) if any(k in c for k in ['code produit', 'code_article', 'ref', 'code'])), 0)
                         idx_m = next((i for i, c in enumerate(cols) if any(k in c for k in ["prix d'achat", 'prix', 'montant', 'ht'])), 1)
                         idx_qte = next((i for i, c in enumerate(cols) if any(k in c for k in ['quantité', 'quantite', 'qte'])), -1)
-                        idx_cli = next((i for i, c in enumerate(cols) if any(k in c for k in ['client/revendeur', 'nom client', 'client', 'nom utilisateur'])), -1)
+                        
+                        idx_cli = -1
+                        for k in ['client/revendeur direct (niv. 1)', 'client/revendeur', 'nom client niveau 2', 'nom client', 'client']:
+                            for i, c in enumerate(cols):
+                                if k in c:
+                                    idx_cli = i
+                                    break
+                            if idx_cli != -1:
+                                break
                         
                         col_ref = df_annexe.columns[idx_ref]
                         col_montant = df_annexe.columns[idx_m]
@@ -200,7 +206,9 @@ with onglet_ht:
                     df_recon['Quantite_Sewan'] = df_recon['Quantite_Sewan'].fillna(0.0)
                     df_recon['Ecart_HT'] = (df_recon['Montant_ERP'] - df_recon['Montant_Sewan']).round(2)
                     
-                    def qualifier_ht_exact(row):
+                    def qualifier_ht_clean(row):
+                        if row['Montant_ERP'] == 0.0 and row['Montant_Sewan'] == 0.0:
+                            return "🟢 Conforme (Option 0€)"
                         if pd.isna(row.get(col_art_artis)):
                             return "🔴 Absent simulation ERP"
                         if pd.isna(row.get('Client_Sewan_Raw')) or row.get('Montant_Sewan', 0) == 0:
@@ -209,9 +217,12 @@ with onglet_ht:
                             return "⚠️ Écart de montant HT"
                         return "🟢 Conforme"
 
-                    df_recon['Diagnostic_RAF'] = df_recon.apply(qualifier_ht_exact, axis=1)
+                    df_recon['Diagnostic_RAF'] = df_recon.apply(qualifier_ht_clean, axis=1)
 
-                    # --- AFFICHAGE SYNTHÈSE METRIQUES ---
+                    df_recon['Code client'] = df_recon['Code client'].fillna(df_recon['Code_Client_Sewan'])
+                    df_recon['Raison sociale client'] = df_recon['Raison sociale client'].fillna(df_recon['Client_Sewan_Raw'])
+
+                    # --- SYNTHÈSE EXÉCUTIVE ---
                     st.markdown("### 📋 Synthèse des Factures Fournisseurs (Abonnements HT)")
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Toolip", f"{tot_toolip:,.2f} €")
@@ -230,18 +241,21 @@ with onglet_ht:
                         k3.metric("Écart Net Global HT", f"{ecart_global:,.2f} €", delta="🟠 À expertiser (> 1 000 €)", delta_color="inverse")
 
                     st.markdown("---")
-                    col_chart, col_stats = st.columns([1, 1])
+                    st.markdown("### 📊 Répartition Financière par Famille de Diagnostic")
+                    
+                    diag_stats_full = df_recon.groupby('Diagnostic_RAF').agg(
+                        Nombre_Lignes=('Diagnostic_RAF', 'count'),
+                        Total_Artis_ERP=('Montant_ERP', 'sum'),
+                        Total_Sewan_Fournisseur=('Montant_Sewan', 'sum'),
+                        Total_Ecart_HT=('Ecart_HT', 'sum')
+                    ).reset_index()
 
-                    with col_stats:
-                        st.markdown("### 📊 Répartition par Statut Diagnostic")
-                        stats_df = df_recon['Diagnostic_RAF'].value_counts().reset_index()
-                        stats_df.columns = ['Statut Diagnostic', 'Nombre de Lignes']
-                        st.dataframe(stats_df, use_container_width=True)
+                    st.dataframe(diag_stats_full, use_container_width=True)
 
+                    col_chart, col_empty = st.columns([1, 1])
                     with col_chart:
                         st.markdown("### 🍕 Proportion des Lignes d'Abonnements")
-                        chart_data = df_recon['Diagnostic_RAF'].value_counts()
-                        st.bar_chart(chart_data)
+                        st.bar_chart(df_recon['Diagnostic_RAF'].value_counts())
 
                     st.markdown("---")
                     st.markdown("### 🔍 Tableau Détaillé des Lignes d'Abonnements")
@@ -259,10 +273,6 @@ with onglet_ht:
                             df_recon[c] = "Non renseigné"
                             
                     df_res_ht = df_recon[cols_export_ht].drop_duplicates()
-                    
-                    buffer_ht = io.BytesIO()
-                    with pd.ExcelWriter(buffer_ht, engine='openpyxl') as writer:
-                        df_res_ht.to_excel(writer, index=False, sheet_name='Analyse_HT_Client_Article')
                     
                     st.dataframe(df_res_ht, use_container_width=True)
                     st.download_button("📥 Télécharger l'Analyse HT Détaillée (.xlsx)", data=buffer_ht.getvalue(), file_name="Analyse_RAF_HT_Detaillee.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
