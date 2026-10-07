@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Matching Libellé RFC / Produit)")
+st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Cascade Tiers Stricte & Fallback Produit)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -60,7 +60,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Matching Libellé RFC)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Cascade Tiers Preservée)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -127,14 +127,15 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC MATCHING LIBELLÉ RFC / PRODUIT ---
+# --- ONGLET 2 : ANALYSE HT AVEC RAPPROCHEMENT TIERS PRESERVÉ + FALLBACK PRODUIT ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Matching par Libellé RFC / Produit)")
+    st.subheader("Rapprochement Financier HT (Rapprochement Tiers Sécurisé & Fallback Libellé)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Matching sur Libellé RFC / Produit et traitement de {nb_annexes} annexes..."):
+            with st.spinner(f"Traitement sur {nb_annexes} annexes CSV..."):
                 try:
+                    # 1. Table de correspondance Tiers
                     client_map = {}
                     if fichier_ref:
                         xls_ref = pd.ExcelFile(fichier_ref)
@@ -269,29 +270,27 @@ with onglet_ht:
                         Annexe_Source=('Annexe_Source', lambda x: ', '.join(set(x)))
                     )
                     
-                    # Rapprochement Niveau 1 : par Code Client Résolu + Article + ParamKey
-                    df_recon_1 = pd.merge(
+                    # RAPPROCHEMENT PRINCIPAL SÉCURISÉ (Outer Join sur Code Client Résolu + Article + ParamKey)
+                    df_recon = pd.merge(
                         df_artis_abonn, 
                         df_fourn, 
                         left_on=['Code_Client_Str', 'Code_Article_ERP', 'Param_Key'], 
                         right_on=['Code_Client_Resolu', 'Code_Article_ERP', 'Param_Key'], 
-                        how='left'
+                        how='outer'
                     )
 
-                    # Rapprochement Niveau 2 : par Libellé RFC / Produit (pour les lignes d'abonnements génériques comme Koesio IDF)
-                    unmatched_mask = df_recon_1['Montant_Sewan'].isna()
+                    # FALLBACK STRICTEMENT RESTREINT : Si et seulement si le Tiers n'a pas matché ET que Produit == Libellé RFC
+                    unmatched_mask = df_recon['Montant_Sewan'].isna() & (df_recon['Code_Client_Str'] == '10')
                     if unmatched_mask.any():
-                        df_unmatched = df_recon_1[unmatched_mask].drop(columns=['Code_Client_Resolu', 'Name_Sewan_Clean', 'Montant_Sewan', 'Quantite_Sewan', 'Client_Sewan_Raw', 'Annexe_Source', 'Produit_Sewan_Clean'], errors='ignore')
-                        df_recon_2 = pd.merge(
+                        df_unmatched = df_recon[unmatched_mask].drop(columns=['Code_Client_Resolu', 'Name_Sewan_Clean', 'Montant_Sewan', 'Quantite_Sewan', 'Client_Sewan_Raw', 'Annexe_Source', 'Produit_Sewan_Clean'], errors='ignore')
+                        df_recon_fallback = pd.merge(
                             df_unmatched,
                             df_fourn,
                             left_on=['Code_Client_Str', 'Code_Article_ERP', 'Libelle_RFC_Clean'],
                             right_on=['Code_Client_Resolu', 'Code_Article_ERP', 'Produit_Sewan_Clean'],
                             how='left'
                         )
-                        df_recon = pd.concat([df_recon_1[~unmatched_mask], df_recon_2], ignore_index=True)
-                    else:
-                        df_recon = df_recon_1.copy()
+                        df_recon = pd.concat([df_recon[~unmatched_mask], df_recon_fallback], ignore_index=True)
 
                     df_recon['Montant_ERP'] = df_recon['Montant_ERP'].fillna(0.0).round(2)
                     df_recon['Montant_Sewan'] = df_recon['Montant_Sewan'].fillna(0.0).round(2)
@@ -317,23 +316,23 @@ with onglet_ht:
                     if 'Client_Sewan_Raw' in df_recon.columns:
                         df_recon['Raison sociale client'] = df_recon['Raison sociale client'].fillna(df_recon['Client_Sewan_Raw'])
 
-                    # CALCUL DYNAMIQUE ET ARITHMÉTIQUE DES TOTALS EXÉCUTIFS
+                    # CALCUL ARITHMÉTIQUE DYNAMIQUE DES TOTALS
                     tot_simulation_artis_reel = df_recon['Montant_ERP'].sum()
                     tot_fournisseurs_reel = df_recon['Montant_Sewan'].sum()
                     ecart_global_reel = tot_simulation_artis_reel - tot_fournisseurs_reel
 
-                    # --- SYNTHÈSE EXÉCUTIVE METRIQUES DYNAMIQUE ---
+                    # --- SYNTHÈSE EXÉCUTIVE METRIQUES ---
                     st.markdown("### 📋 Synthèse des Factures Fournisseurs (Abonnements HT)")
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Toolip", f"{tot_toolip:,.2f} €")
                     c2.metric("Sokatel", f"{tot_sokatel:,.2f} €")
                     c3.metric("Nextphone", f"{tot_nextphone:,.2f} €")
-                    c4.metric("Total 3 Factures Sewan", f"{tot_fournisseurs:,.2f} €")
+                    c4.metric("Total 3 Factures Sewan", f"{tot_fournisseurs_reel:,.2f} €")
 
-                    st.markdown("### 🧮 Comparatif Global ERP vs Fournisseurs (Reconstitution Réelle)")
+                    st.markdown("### 🧮 Comparatif Global ERP vs Fournisseurs")
                     k1, k2, k3 = st.columns(3)
                     k1.metric("Total ERP Extrait (Sewan)", f"{tot_simulation_artis_reel:,.2f} €")
-                    k2.metric("Total Réconcilié Annexes Sewan", f"{tot_fournisseurs_reel:,.2f} €")
+                    k2.metric("Total Reconstitution Annexes Sewan", f"{tot_fournisseurs_reel:,.2f} €")
                     
                     if abs(ecart_global_reel) < 1000.0:
                         k3.metric("Écart Net Global HT", f"{ecart_global_reel:,.2f} €", delta="🟢 Conforme (< 1 000 €)", delta_color="normal")
