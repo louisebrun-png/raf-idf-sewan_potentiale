@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Filtre Strict SEWAN)")
+st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Traçabilité Source Annexe)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -31,12 +31,6 @@ def clean_string_fuzzy(s):
     if not isinstance(s, str) or pd.isna(s):
         return ""
     return re.sub(r'[^a-zA-Z0-9]', '', str(s).lower())
-
-def extract_client_code(client_str):
-    if not isinstance(client_str, str) or pd.isna(client_str) or str(client_str).strip() in ['', 'nan', 'None', '-']:
-        return ""
-    m = re.match(r'^\s*([A-Za-z0-9_\-]+)', str(client_str))
-    return m.group(1).strip() if m else str(client_str).strip()
 
 def extract_param_key(text):
     if not isinstance(text, str) or pd.isna(text):
@@ -60,22 +54,16 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Filtre Strict SEWAN)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Détail Tiers & Annexes)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
     st.subheader("Audit Fiscale TVA (STD 20% vs APST 0%)")
     if fichier_artis and factures_pdf:
         if st.button("🚨 Lancer l'Analyse TVA", type="primary", key="btn_tva"):
-            with st.spinner("Analyse des factures PDF Sewan et vérification des RFC ERP..."):
+            with st.spinner("Analyse du texte brut des factures PDF Sewan et vérification des RFC ERP..."):
                 try:
                     df_artis = pd.read_excel(fichier_artis)
-                    
-                    # Filtre strict SEWAN sur la colonne fournisseur ERP
-                    col_fourn_artis = next((c for c in df_artis.columns if 'ABONNEMENT' in c and ('fournisseur' in c.lower() or 'raison soc' in c.lower() or 'org' in c.lower())), None)
-                    if col_fourn_artis:
-                        df_artis = df_artis[df_artis[col_fourn_artis].astype(str).str.contains('SEWAN', case=False, na=False)].copy()
-
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
                     df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
@@ -133,32 +121,56 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC FILTRE STRICT SEWAN ---
+# --- ONGLET 2 : ANALYSE HT AVEC TRACABILITÉ DES ANNEXES SOURCES ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Strict Périmètre SEWAN)")
+    st.subheader("Rapprochement Financier HT (Détail Tiers & Annexes Sources)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Filtrage strict sur SEWAN et traitement des {nb_annexes} annexes CSV..."):
+            with st.spinner(f"Chargement de la table de correspondance Tiers et réconciliation de {nb_annexes} annexes..."):
                 try:
+                    # 1. Table de correspondance Tiers
+                    client_map = {}
+                    if fichier_ref:
+                        xls_ref = pd.ExcelFile(fichier_ref)
+                        sheet_cli = 'Analyse clients' if 'Analyse clients' in xls_ref.sheet_names else xls_ref.sheet_names[0]
+                        df_ref_cli = pd.read_excel(fichier_ref, sheet_name=sheet_cli)
+                        for _, row in df_ref_cli.iterrows():
+                            artis_code = str(row.get('CODE', '')).strip()
+                            if not artis_code or artis_code == 'nan':
+                                continue
+                            for col_name in ['Client/revendeur direct (niv. 1)', 'Réf. client/revendeur direct (niv. 1)', 'Nom client Niveau 2', 'Ref client Niveau 2']:
+                                val = str(row.get(col_name, '')).strip()
+                                if val and val != 'nan':
+                                    client_map[val.lower()] = artis_code
+                                    m = re.match(r'^([A-Za-z0-9_\-]+)', val)
+                                    if m:
+                                        client_map[m.group(1).lower()] = artis_code
+
+                    def resoudre_code_client_artis(cli_raw):
+                        if not isinstance(cli_raw, str) or pd.isna(cli_raw) or str(cli_raw).strip() in ['', 'nan', 'None', '-']:
+                            return ""
+                        c_str = str(cli_raw).strip()
+                        c_lower = c_str.lower()
+                        if c_lower in client_map:
+                            return client_map[c_lower]
+                        m = re.match(r'^([A-Za-z0-9_\-]+)', c_str)
+                        if m and m.group(1).lower() in client_map:
+                            return client_map[m.group(1).lower()]
+                        return c_str
+
                     tot_toolip = 15324.15
                     tot_sokatel = 10874.99
                     tot_nextphone = 1981.41
                     tot_fournisseurs = tot_toolip + tot_sokatel + tot_nextphone
 
                     df_artis = pd.read_excel(fichier_artis)
-                    
-                    # FILTRE STRICT SEWAN DANS L'ERP
-                    col_fourn_artis = next((c for c in df_artis.columns if 'ABONNEMENT' in c and ('fournisseur' in c.lower() or 'raison soc' in c.lower() or 'org' in c.lower())), None)
-                    if col_fourn_artis:
-                        df_artis = df_artis[df_artis[col_fourn_artis].astype(str).str.contains('SEWAN', case=False, na=False)].copy()
-
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
                     df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
                     col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis_abonn.columns else df_artis.columns[1]
                     df_artis_abonn['Montant_ERP'] = df_artis_abonn[col_m_artis].fillna(0.0)
-                    df_artis_abonn['Code_Client_Clean'] = df_artis_abonn['Code client'].apply(clean_string_fuzzy)
+                    df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip()
                     df_artis_abonn['Param_Key'] = df_artis_abonn['Libellé RFC'].apply(extract_param_key)
 
                     tot_simulation_artis = 27787.45
@@ -180,20 +192,17 @@ with onglet_ht:
                         idx_qte = next((i for i, c in enumerate(cols) if any(k in c for k in ['quantité', 'quantite', 'qte'])), -1)
                         idx_p1 = next((i for i, c in enumerate(cols) if 'param1' in c), -1)
                         
-                        idx_cli = -1
-                        for k in ['client/revendeur direct (niv. 1)', 'client/revendeur', 'nom client niveau 2', 'nom client', 'client']:
-                            for i, c in enumerate(cols):
-                                if k in c:
-                                    idx_cli = i
-                                    break
-                            if idx_cli != -1:
-                                break
+                        # Exploration multi-colonnes pour trouver le Tiers dans l'annexe
+                        idx_cli1 = next((i for i, c in enumerate(cols) if 'client/revendeur direct (niv. 1)' in c or 'client/revendeur' in c), -1)
+                        idx_cli2 = next((i for i, c in enumerate(cols) if 'nom client niveau 2' in c or 'nom client' in c), -1)
                         
                         col_ref = df_annexe.columns[idx_ref]
                         col_montant = df_annexe.columns[idx_m]
                         col_qte = df_annexe.columns[idx_qte] if idx_qte != -1 else None
-                        col_client = df_annexe.columns[idx_cli] if idx_cli != -1 else None
                         col_param1 = df_annexe.columns[idx_p1] if idx_p1 != -1 else None
+                        
+                        col_cli1 = df_annexe.columns[idx_cli1] if idx_cli1 != -1 else None
+                        col_cli2 = df_annexe.columns[idx_cli2] if idx_cli2 != -1 else None
                         
                         for _, row in df_annexe.iterrows():
                             ref = isoler_ref_article(str(row[col_ref]))
@@ -207,31 +216,39 @@ with onglet_ht:
                             except ValueError:
                                 q_sewan = 1.0
                             
-                            cli_raw = str(row[col_client]) if col_client else ""
-                            cli_code = extract_client_code(cli_raw)
+                            # Prise d'information client en cascades
+                            cli_raw = ""
+                            if col_cli1 and pd.notna(row[col_cli1]) and str(row[col_cli1]).strip() not in ['', 'nan', '-']:
+                                cli_raw = str(row[col_cli1]).strip()
+                            elif col_cli2 and pd.notna(row[col_cli2]) and str(row[col_cli2]).strip() not in ['', 'nan', '-']:
+                                cli_raw = str(row[col_cli2]).strip()
+                                
+                            code_client_resolu = resoudre_code_client_artis(cli_raw)
                             p1_val = str(row[col_param1]) if col_param1 else ""
                             param_key = extract_param_key(p1_val)
                             
                             lignes_fourn.append({
-                                'Code_Sewan_Clean': clean_string_fuzzy(cli_code),
+                                'Code_Client_Resolu': code_client_resolu,
                                 'Code_Article_ERP': ref,
                                 'Param_Key': param_key,
                                 'Montant_Sewan': m_ht,
                                 'Quantite_Sewan': q_sewan,
-                                'Client_Sewan_Raw': cli_raw
+                                'Client_Sewan_Raw': cli_raw,
+                                'Annexe_Source': annexe.name  # Traçabilité du fichier
                             })
                             
-                    df_fourn = pd.DataFrame(lignes_fourn).groupby(['Code_Sewan_Clean', 'Code_Article_ERP', 'Param_Key'], as_index=False).agg(
+                    df_fourn = pd.DataFrame(lignes_fourn).groupby(['Code_Client_Resolu', 'Code_Article_ERP', 'Param_Key'], as_index=False).agg(
                         Montant_Sewan=('Montant_Sewan', 'sum'),
                         Quantite_Sewan=('Quantite_Sewan', 'sum'),
-                        Client_Sewan_Raw=('Client_Sewan_Raw', 'first')
+                        Client_Sewan_Raw=('Client_Sewan_Raw', 'first'),
+                        Annexe_Source=('Annexe_Source', lambda x: ', '.join(set(x)))
                     )
                     
                     df_recon = pd.merge(
                         df_artis_abonn, 
                         df_fourn, 
-                        left_on=['Code_Client_Clean', 'Code_Article_ERP', 'Param_Key'], 
-                        right_on=['Code_Sewan_Clean', 'Code_Article_ERP', 'Param_Key'], 
+                        left_on=['Code_Client_Str', 'Code_Article_ERP', 'Param_Key'], 
+                        right_on=['Code_Client_Resolu', 'Code_Article_ERP', 'Param_Key'], 
                         how='outer'
                     )
                     
@@ -254,8 +271,8 @@ with onglet_ht:
 
                     df_recon['Diagnostic_RAF'] = df_recon.apply(qualifier_ht_exact, axis=1)
 
-                    if 'Code_Sewan_Clean' in df_recon.columns:
-                        df_recon['Code client'] = df_recon['Code client'].fillna(df_recon['Code_Sewan_Clean'])
+                    if 'Code_Client_Resolu' in df_recon.columns:
+                        df_recon['Code client'] = df_recon['Code client'].fillna(df_recon['Code_Client_Resolu'])
                     if 'Client_Sewan_Raw' in df_recon.columns:
                         df_recon['Raison sociale client'] = df_recon['Raison sociale client'].fillna(df_recon['Client_Sewan_Raw'])
 
@@ -301,7 +318,7 @@ with onglet_ht:
                         st.bar_chart(df_recon['Diagnostic_RAF'].value_counts(normalize=True) * 100)
 
                     st.markdown("---")
-                    st.markdown("### 🔍 Tableau Détaillé des Lignes d'Abonnements")
+                    st.markdown("### 🔍 Tableau Détaillé des Lignes d'Abonnements (avec Fichier Source)")
 
                     if 'Raison sociale client' in df_recon.columns:
                         df_recon['Raison sociale client'] = df_recon['Raison sociale client'].astype(str).str.slice(0, 20)
@@ -309,7 +326,7 @@ with onglet_ht:
                     cols_export_ht = [
                         'Code client', 'Raison sociale client', 'Code SSC', 'Code RFC', 'Libellé RFC', 
                         'Code_Article_ERP', 'Quantite_ERP', 'Quantite_Sewan', 
-                        'Montant_ERP', 'Montant_Sewan', 'Ecart_HT', 'Diagnostic_RAF'
+                        'Montant_ERP', 'Montant_Sewan', 'Ecart_HT', 'Diagnostic_RAF', 'Annexe_Source'
                     ]
                     for c in cols_export_ht:
                         if c not in df_recon.columns:
