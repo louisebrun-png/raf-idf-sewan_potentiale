@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Cascade Séquentielle Stricte)")
+st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Cascade Tiers Stricte & Universal Key)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -59,14 +59,14 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Cascade Séquentielle)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Cascade Tiers Stricte)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
     st.subheader("Audit Fiscale TVA (STD 20% vs APST 0%)")
     if fichier_artis and factures_pdf:
         if st.button("🚨 Lancer l'Analyse TVA", type="primary", key="btn_tva"):
-            with st.spinner("Analyse du texte brut des factures PDF Sewan et vérification des RFC ERP..."):
+            with st.spinner("Analyse des factures PDF Sewan et vérification des RFC ERP..."):
                 try:
                     df_artis = pd.read_excel(fichier_artis)
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
@@ -126,15 +126,15 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC CASCADE SÉQUENTIELLE STRICTE ---
+# --- ONGLET 2 : ANALYSE HT ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Cascade Séquentielle Stricte)")
+    st.subheader("Rapprochement Financier HT (Cascade Tiers Stricte)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Traitement séquentiel sur {nb_annexes} annexes..."):
+            with st.spinner(f"Traitement sur {nb_annexes} annexes CSV..."):
                 try:
-                    # 1. Table de correspondance Tiers
+                    # Table de correspondance Tiers
                     client_map = {}
                     if fichier_ref:
                         xls_ref = pd.ExcelFile(fichier_ref)
@@ -251,14 +251,14 @@ with onglet_ht:
                             param_key = extract_param_key_strict(p1_val)
                             
                             lignes_fourn.append({
-                                'Code_Client_Resolu': res_code,
+                                'Code_Client_Resolu': res_code if res_code else "10",
                                 'Name_Sewan_Clean': clean_string_fuzzy(cli_raw),
                                 'Code_Article_ERP': ref,
                                 'Param_Key': param_key,
                                 'Produit_Sewan_Clean': clean_string_fuzzy(prod_val),
                                 'Montant_Sewan': m_ht,
                                 'Quantite_Sewan': q_sewan,
-                                'Client_Sewan_Raw': cli_raw,
+                                'Client_Sewan_Raw': cli_raw if cli_raw else "KOESIO ILE DE FRANCE",
                                 'Annexe_Source': annexe.name
                             })
                             
@@ -269,7 +269,7 @@ with onglet_ht:
                         Annexe_Source=('Annexe_Source', lambda x: ', '.join(set(x)))
                     )
                     
-                    # 1er PASSAGE : MATCH STRICT PAR CODE CLIENT RÉSULU + ARTICLE + PARAM1
+                    # 1. Match principal Tiers
                     df_recon_1 = pd.merge(
                         df_artis_abonn, 
                         df_fourn, 
@@ -278,10 +278,11 @@ with onglet_ht:
                         how='left'
                     )
 
-                    # 2ème PASSAGE (FALLBACK SPECIFIQUE KOESIO IDF / ORPHELINS LIBELLÉ PRODUIT)
+                    # 2. Match de secours Koesio IDF sur Produit
                     unmatched_mask = df_recon_1['Montant_Sewan'].isna()
                     if unmatched_mask.any():
                         df_unmatched = df_recon_1[unmatched_mask].drop(columns=['Code_Client_Resolu', 'Name_Sewan_Clean', 'Montant_Sewan', 'Quantite_Sewan', 'Client_Sewan_Raw', 'Annexe_Source', 'Produit_Sewan_Clean'], errors='ignore')
+                        
                         df_recon_2 = pd.merge(
                             df_unmatched,
                             df_fourn,
@@ -317,7 +318,7 @@ with onglet_ht:
                     if 'Client_Sewan_Raw' in df_recon.columns:
                         df_recon['Raison sociale client'] = df_recon['Raison sociale client'].fillna(df_recon['Client_Sewan_Raw'])
 
-                    # CALCUL DYNAMIQUE ET ARITHMÉTIQUE DES TOTALS
+                    # CALCUL DYNAMIQUE
                     tot_simulation_artis_reel = df_recon['Montant_ERP'].sum()
                     tot_fournisseurs_reel = df_recon['Montant_Sewan'].sum()
                     ecart_global_reel = tot_simulation_artis_reel - tot_fournisseurs_reel
@@ -328,7 +329,7 @@ with onglet_ht:
                     c1.metric("Toolip", f"{tot_toolip:,.2f} €")
                     c2.metric("Sokatel", f"{tot_sokatel:,.2f} €")
                     c3.metric("Nextphone", f"{tot_nextphone:,.2f} €")
-                    c4.metric("Total 3 Factures Sewan", f"{tot_fournisseurs_reel:,.2f} €")
+                    c4.metric("Total 3 Factures Sewan", f"{tot_fournisseurs:,.2f} €")
 
                     st.markdown("### 🧮 Comparatif Global ERP vs Fournisseurs (Reconstitution Réelle)")
                     k1, k2, k3 = st.columns(3)
