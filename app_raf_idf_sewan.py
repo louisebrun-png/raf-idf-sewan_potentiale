@@ -27,6 +27,12 @@ def isoler_ref_article(libelle):
     match = re.search(r'([0-9]{2}-[\d\-]+-[0-9]{2}-[MFUV])', libelle)
     return match.group(1) if match else libelle.split(' - ')[0].strip()
 
+def extract_client_code(client_str):
+    if not isinstance(client_str, str) or pd.isna(client_str) or str(client_str).strip() in ['', 'nan', 'None', '-']:
+        return ""
+    m = re.match(r'^\s*([A-Za-z0-9_\-]+)', str(client_str))
+    return m.group(1).strip() if m else str(client_str).strip()
+
 def lire_csv_securise(fichier):
     for enc in ['latin1', 'iso-8859-1', 'cp1252', 'utf-8']:
         try:
@@ -37,15 +43,14 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-# REORGANISATION : TVA en premier, Quantité/Prix HT en second
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Global)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Détail Client/Article)"])
 
-# --- ONGLET 1 : AUDIT TVA ---
+# --- ONGLET 1 : AUDIT TVA (AVEC VÉRIFICATION EXACTE DE LA RFC ERP) ---
 with onglet_tva:
     st.subheader("Audit Fiscale TVA (STD 20% vs APST 0%)")
     if fichier_artis and factures_pdf:
         if st.button("🚨 Lancer l'Analyse TVA", type="primary", key="btn_tva"):
-            with st.spinner("Analyse du texte brut des factures PDF Sewan et vérification ERP..."):
+            with st.spinner("Analyse du texte brut des factures PDF Sewan et vérification des RFC ERP..."):
                 try:
                     df_artis = pd.read_excel(fichier_artis)
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
@@ -105,13 +110,13 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC DETALL RFC & QUANTITES ---
+# --- ONGLET 2 : RAPPROCHEMENT PAR CLIENT ET PAR ARTICLE ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Détail RFC & Quantités)")
+    st.subheader("Rapprochement Financier HT (Détail par Client & Article)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Traitement des {nb_annexes} annexes CSV/Excel et réconciliation avec Artis ERP..."):
+            with st.spinner(f"Traitement des {nb_annexes} annexes CSV/Excel et réconciliation par Client/Article..."):
                 try:
                     df_artis = pd.read_excel(fichier_artis)
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
@@ -119,6 +124,7 @@ with onglet_ht:
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
                     col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis.columns else df_artis.columns[1]
                     df_artis_abonn['Montant_ERP'] = df_artis_abonn[col_m_artis].fillna(0.0)
+                    df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip()
                     
                     col_qte_artis = next((c for c in df_artis_abonn.columns if any(k in c.lower() for k in ['nb bien', 'quantité', 'nb_bien', 'qte'])), None)
                     if col_qte_artis:
@@ -134,12 +140,12 @@ with onglet_ht:
                         idx_ref = next((i for i, c in enumerate(cols) if any(k in c for k in ['code produit', 'code_article', 'ref', 'code'])), 0)
                         idx_m = next((i for i, c in enumerate(cols) if any(k in c for k in ["prix d'achat", 'prix', 'montant', 'ht'])), 1)
                         idx_qte = next((i for i, c in enumerate(cols) if any(k in c for k in ['quantité', 'quantite', 'qte'])), -1)
-                        idx_cli = next((i for i, c in enumerate(cols) if any(k in c for k in ['nom client', 'client', 'nom utilisateur', 'description'])), -1)
+                        idx_cli = next((i for i, c in enumerate(cols) if any(k in c for k in ['client/revendeur', 'nom client', 'client', 'nom utilisateur'])), -1)
                         
                         col_ref = df_annexe.columns[idx_ref]
                         col_montant = df_annexe.columns[idx_m]
                         col_qte = df_annexe.columns[idx_qte] if idx_qte != -1 else None
-                        col_client = df_annexe.columns[idx_cli]
+                        col_client = df_annexe.columns[idx_cli] if idx_cli != -1 else None
                         
                         for _, row in df_annexe.iterrows():
                             ref = isoler_ref_article(str(row[col_ref]))
@@ -153,35 +159,47 @@ with onglet_ht:
                             except ValueError:
                                 q_sewan = 1.0
                             
+                            cli_raw = str(row[col_client]) if col_client else ""
+                            cli_code = extract_client_code(cli_raw)
+                            
                             lignes_fourn.append({
+                                'Code_Client_Sewan': cli_code,
                                 'Code_Article_ERP': ref,
                                 'Montant_Sewan': m_ht,
                                 'Quantite_Sewan': q_sewan,
-                                'Client_Sewan': str(row[col_client])
+                                'Client_Sewan_Raw': cli_raw
                             })
                             
-                    df_fourn = pd.DataFrame(lignes_fourn).groupby(['Code_Article_ERP', 'Client_Sewan'], as_index=False).agg(
+                    df_fourn = pd.DataFrame(lignes_fourn).groupby(['Code_Client_Sewan', 'Code_Article_ERP'], as_index=False).agg(
                         Montant_Sewan=('Montant_Sewan', 'sum'),
-                        Quantite_Sewan=('Quantite_Sewan', 'sum')
+                        Quantite_Sewan=('Quantite_Sewan', 'sum'),
+                        Client_Sewan_Raw=('Client_Sewan_Raw', 'first')
                     )
                     
-                    df_recon = pd.merge(df_artis_abonn, df_fourn, on='Code_Article_ERP', how='outer')
+                    df_recon = pd.merge(
+                        df_artis_abonn, 
+                        df_fourn, 
+                        left_on=['Code_Client_Str', 'Code_Article_ERP'], 
+                        right_on=['Code_Client_Sewan', 'Code_Article_ERP'], 
+                        how='outer'
+                    )
+                    
                     df_recon['Montant_ERP'] = df_recon['Montant_ERP'].fillna(0.0).round(2)
                     df_recon['Montant_Sewan'] = df_recon['Montant_Sewan'].fillna(0.0).round(2)
                     df_recon['Quantite_ERP'] = df_recon['Quantite_ERP'].fillna(0.0)
                     df_recon['Quantite_Sewan'] = df_recon['Quantite_Sewan'].fillna(0.0)
                     df_recon['Ecart_HT'] = (df_recon['Montant_ERP'] - df_recon['Montant_Sewan']).round(2)
                     
-                    def qualifier_ht_detail(row):
+                    def qualifier_ht_exact(row):
                         if pd.isna(row.get(col_art_artis)):
                             return "🔴 Absent simulation ERP"
-                        if pd.isna(row.get('Client_Sewan')) or row.get('Montant_Sewan', 0) == 0:
+                        if pd.isna(row.get('Client_Sewan_Raw')) or row.get('Montant_Sewan', 0) == 0:
                             return "🟠 Absent annexe fournisseur"
                         if abs(row['Ecart_HT']) > 0.05:
                             return "⚠️ Écart de montant HT"
                         return "🟢 Conforme"
 
-                    df_recon['Diagnostic_RAF'] = df_recon.apply(qualifier_ht_detail, axis=1)
+                    df_recon['Diagnostic_RAF'] = df_recon.apply(qualifier_ht_exact, axis=1)
                     
                     if 'Raison sociale client' in df_recon.columns:
                         df_recon['Raison sociale client'] = df_recon['Raison sociale client'].astype(str).str.slice(0, 20)
@@ -199,7 +217,7 @@ with onglet_ht:
                     
                     buffer_ht = io.BytesIO()
                     with pd.ExcelWriter(buffer_ht, engine='openpyxl') as writer:
-                        df_res_ht.to_excel(writer, index=False, sheet_name='Analyse_HT_Detail')
+                        df_res_ht.to_excel(writer, index=False, sheet_name='Analyse_HT_Client_Article')
                     
                     st.success(f"Rapprochement HT terminé : {len(df_res_ht)} lignes analysées !")
                     st.dataframe(df_res_ht, use_container_width=True)
