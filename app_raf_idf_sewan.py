@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Cascade Tiers Strict 1->2->3)")
+st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Lecture Colonne FA Quantité)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -60,14 +60,14 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Cascade Tiers 1->2->3)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Colonne FA Quantité ERP)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
     st.subheader("Audit Fiscale TVA (STD 20% vs APST 0%)")
     if fichier_artis and factures_pdf:
         if st.button("🚨 Lancer l'Analyse TVA", type="primary", key="btn_tva"):
-            with st.spinner("Analyse du texte brut des factures PDF Sewan et vérification des RFC ERP..."):
+            with st.spinner("Analyse des factures PDF Sewan et vérification des RFC ERP..."):
                 try:
                     df_artis = pd.read_excel(fichier_artis)
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
@@ -127,15 +127,14 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC CASCADE TIERS STRICTE ---
+# --- ONGLET 2 : ANALYSE HT AVEC COLONNE FA QUANTITÉ ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Cascade Tiers : Table ➔ Nom ➔ Param1/Param2)")
+    st.subheader("Rapprochement Financier HT (Lecture Colonne FA Quantité)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Traitement en cascade Tiers sur {nb_annexes} annexes..."):
+            with st.spinner(f"Traitement sur colonne FA (Nombre d'unités) et {nb_annexes} annexes..."):
                 try:
-                    # 1. Chargement Table de correspondance
                     client_map = {}
                     if fichier_ref:
                         xls_ref = pd.ExcelFile(fichier_ref)
@@ -168,8 +167,6 @@ with onglet_ht:
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
                     df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
-                    
-                    # Isolation des articles récurrents (exclut -F)
                     df_artis_abonn = df_artis_abonn[~df_artis_abonn['Code_Article_ERP'].str.endswith('-F')].copy()
 
                     col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis_abonn.columns else df_artis.columns[1]
@@ -181,9 +178,13 @@ with onglet_ht:
                     tot_simulation_artis = 27787.45
                     ecart_global = tot_simulation_artis - tot_fournisseurs
 
-                    col_qte_artis = next((c for c in df_artis_abonn.columns if any(k in c.lower() for k in ['nb bien', 'quantité', 'nb_bien', 'qte'])), None)
-                    if col_qte_artis:
-                        df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn[col_qte_artis], errors='coerce').fillna(1.0)
+                    # EXTRACTION CIBLÉE SUR LA COLONNE FA (Nombre d'unités)
+                    col_qte_fa = next((c for c in df_artis_abonn.columns if 'ABONNEMENT' in c and 'Nombre' in c), None)
+                    if not col_qte_fa:
+                        col_qte_fa = next((c for c in df_artis_abonn.columns if any(k in c.lower() for k in ['nb bien', 'quantité', 'nb_bien', 'qte'])), None)
+                    
+                    if col_qte_fa:
+                        df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn[col_qte_fa], errors='coerce').fillna(1.0)
                     else:
                         df_artis_abonn['Quantite_ERP'] = 1.0
 
@@ -229,9 +230,7 @@ with onglet_ht:
                             p1_val = str(row[col_param1]) if col_param1 else ""
                             p2_val = str(row[col_param2]) if col_param2 else ""
                             
-                            # RESOLUTION DE LA CASCADE TIERS (1 -> 2 -> 3)
                             res_code = ""
-                            # 1. Table de correspondance Excel
                             for test_val in [c1_str, c2_str, p1_val, p2_val]:
                                 if test_val.lower() in client_map:
                                     res_code = client_map[test_val.lower()]
@@ -241,7 +240,6 @@ with onglet_ht:
                                     res_code = client_map[token.lower()]
                                     break
                                     
-                            # 2. Token direct du Tiers s'il est au format connu
                             if not res_code:
                                 for test_val in [c1_str, c2_str, p1_val, p2_val]:
                                     token = extract_code_from_string(test_val)
@@ -270,7 +268,6 @@ with onglet_ht:
                         Annexe_Source=('Annexe_Source', lambda x: ', '.join(set(x)))
                     )
                     
-                    # Rapprochement Niveau 1 : par Code Client Résolu
                     df_recon_1 = pd.merge(
                         df_artis_abonn, 
                         df_fourn, 
@@ -279,7 +276,6 @@ with onglet_ht:
                         how='left'
                     )
 
-                    # Rapprochement Niveau 2 : par Raison Sociale nettoyée pour les non-matchés
                     unmatched_mask = df_recon_1['Montant_Sewan'].isna()
                     if unmatched_mask.any():
                         df_unmatched = df_recon_1[unmatched_mask].drop(columns=['Code_Client_Resolu', 'Name_Sewan_Clean', 'Montant_Sewan', 'Quantite_Sewan', 'Client_Sewan_Raw', 'Annexe_Source'], errors='ignore')
