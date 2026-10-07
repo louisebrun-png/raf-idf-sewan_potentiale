@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Cascade Tiers Stricte & Fallback Produit)")
+st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Clé Universelle Libellé/Paramètre)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -32,17 +32,15 @@ def clean_string_fuzzy(s):
         return ""
     return re.sub(r'[^a-zA-Z0-9]', '', str(s).lower())
 
-def extract_param_key(text):
+def extract_universal_param_key(text):
+    """ Extrait 9 chiffres si numéro, sinon nettoie la chaîne alphanumérique complète (ex: applicationcti189116) """
     if not isinstance(text, str) or pd.isna(text):
         return ""
-    text_clean = str(text).replace('+', '').replace(' ', '').replace('//', ' ')
-    m_num = re.search(r'(\d{9,12})', text_clean)
-    if m_num:
-        return m_num.group(1)
-    m_id = re.search(r'([a-zA-Z0-9_\-\.]+@[a-zA-Z0-9_\-\.]+)', text_clean)
-    if m_id:
-        return m_id.group(1).lower()
-    return text_clean.strip()
+    text_str = str(text).strip()
+    digits = re.sub(r'\D', '', text_str)
+    if len(digits) >= 9:
+        return digits[-9:]
+    return clean_string_fuzzy(text_str)
 
 def extract_code_from_string(text):
     if not isinstance(text, str) or pd.isna(text):
@@ -60,14 +58,14 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Cascade Tiers Preservée)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Clé Universelle)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
     st.subheader("Audit Fiscale TVA (STD 20% vs APST 0%)")
     if fichier_artis and factures_pdf:
         if st.button("🚨 Lancer l'Analyse TVA", type="primary", key="btn_tva"):
-            with st.spinner("Analyse des factures PDF Sewan et vérification des RFC ERP..."):
+            with st.spinner("Analyse du texte brut des factures PDF Sewan et vérification des RFC ERP..."):
                 try:
                     df_artis = pd.read_excel(fichier_artis)
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
@@ -127,15 +125,14 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC RAPPROCHEMENT TIERS PRESERVÉ + FALLBACK PRODUIT ---
+# --- ONGLET 2 : ANALYSE HT AVEC CLÉ UNIVERSELLE ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Rapprochement Tiers Sécurisé & Fallback Libellé)")
+    st.subheader("Rapprochement Financier HT (Clé Universelle Libellé / Paramètre)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Traitement sur {nb_annexes} annexes CSV..."):
+            with st.spinner(f"Traitement haute précision sur {nb_annexes} annexes..."):
                 try:
-                    # 1. Table de correspondance Tiers
                     client_map = {}
                     if fichier_ref:
                         xls_ref = pd.ExcelFile(fichier_ref)
@@ -173,9 +170,7 @@ with onglet_ht:
                     col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis_abonn.columns else df_artis.columns[1]
                     df_artis_abonn['Montant_ERP'] = df_artis_abonn[col_m_artis].fillna(0.0)
                     df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip()
-                    df_artis_abonn['Name_Client_Clean'] = df_artis_abonn['Raison sociale client'].apply(clean_string_fuzzy)
-                    df_artis_abonn['Param_Key'] = df_artis_abonn['Libellé RFC'].apply(extract_param_key)
-                    df_artis_abonn['Libelle_RFC_Clean'] = df_artis_abonn['Libellé RFC'].apply(clean_string_fuzzy)
+                    df_artis_abonn['Param_Key'] = df_artis_abonn['Libellé RFC'].apply(extract_universal_param_key)
 
                     col_qte_fa = next((c for c in df_artis_abonn.columns if 'ABONNEMENT' in c and 'Nombre' in c), None)
                     if not col_qte_fa:
@@ -249,28 +244,28 @@ with onglet_ht:
                                         break
                                         
                             cli_raw = c1_str if c1_str else (c2_str if c2_str else p1_val)
-                            param_key = extract_param_key(p1_val)
+                            
+                            # CLÉ UNIVERSELLE : Param1 si présent, sinon Libellé Produit
+                            param_key = extract_universal_param_key(p1_val) if p1_val else extract_universal_param_key(prod_val)
                             
                             lignes_fourn.append({
                                 'Code_Client_Resolu': res_code,
                                 'Name_Sewan_Clean': clean_string_fuzzy(cli_raw),
                                 'Code_Article_ERP': ref,
                                 'Param_Key': param_key,
-                                'Produit_Sewan_Clean': clean_string_fuzzy(prod_val),
                                 'Montant_Sewan': m_ht,
                                 'Quantite_Sewan': q_sewan,
                                 'Client_Sewan_Raw': cli_raw,
                                 'Annexe_Source': annexe.name
                             })
                             
-                    df_fourn = pd.DataFrame(lignes_fourn).groupby(['Code_Client_Resolu', 'Name_Sewan_Clean', 'Code_Article_ERP', 'Param_Key', 'Produit_Sewan_Clean'], as_index=False).agg(
+                    df_fourn = pd.DataFrame(lignes_fourn).groupby(['Code_Client_Resolu', 'Name_Sewan_Clean', 'Code_Article_ERP', 'Param_Key'], as_index=False).agg(
                         Montant_Sewan=('Montant_Sewan', 'sum'),
                         Quantite_Sewan=('Quantite_Sewan', 'sum'),
                         Client_Sewan_Raw=('Client_Sewan_Raw', 'first'),
                         Annexe_Source=('Annexe_Source', lambda x: ', '.join(set(x)))
                     )
                     
-                    # RAPPROCHEMENT PRINCIPAL SÉCURISÉ (Outer Join sur Code Client Résolu + Article + ParamKey)
                     df_recon = pd.merge(
                         df_artis_abonn, 
                         df_fourn, 
@@ -278,19 +273,6 @@ with onglet_ht:
                         right_on=['Code_Client_Resolu', 'Code_Article_ERP', 'Param_Key'], 
                         how='outer'
                     )
-
-                    # FALLBACK STRICTEMENT RESTREINT : Si et seulement si le Tiers n'a pas matché ET que Produit == Libellé RFC
-                    unmatched_mask = df_recon['Montant_Sewan'].isna() & (df_recon['Code_Client_Str'] == '10')
-                    if unmatched_mask.any():
-                        df_unmatched = df_recon[unmatched_mask].drop(columns=['Code_Client_Resolu', 'Name_Sewan_Clean', 'Montant_Sewan', 'Quantite_Sewan', 'Client_Sewan_Raw', 'Annexe_Source', 'Produit_Sewan_Clean'], errors='ignore')
-                        df_recon_fallback = pd.merge(
-                            df_unmatched,
-                            df_fourn,
-                            left_on=['Code_Client_Str', 'Code_Article_ERP', 'Libelle_RFC_Clean'],
-                            right_on=['Code_Client_Resolu', 'Code_Article_ERP', 'Produit_Sewan_Clean'],
-                            how='left'
-                        )
-                        df_recon = pd.concat([df_recon[~unmatched_mask], df_recon_fallback], ignore_index=True)
 
                     df_recon['Montant_ERP'] = df_recon['Montant_ERP'].fillna(0.0).round(2)
                     df_recon['Montant_Sewan'] = df_recon['Montant_Sewan'].fillna(0.0).round(2)
@@ -316,7 +298,7 @@ with onglet_ht:
                     if 'Client_Sewan_Raw' in df_recon.columns:
                         df_recon['Raison sociale client'] = df_recon['Raison sociale client'].fillna(df_recon['Client_Sewan_Raw'])
 
-                    # CALCUL ARITHMÉTIQUE DYNAMIQUE DES TOTALS
+                    # CALCUL DYNAMIQUE DES TOTALS
                     tot_simulation_artis_reel = df_recon['Montant_ERP'].sum()
                     tot_fournisseurs_reel = df_recon['Montant_Sewan'].sum()
                     ecart_global_reel = tot_simulation_artis_reel - tot_fournisseurs_reel
@@ -329,10 +311,10 @@ with onglet_ht:
                     c3.metric("Nextphone", f"{tot_nextphone:,.2f} €")
                     c4.metric("Total 3 Factures Sewan", f"{tot_fournisseurs_reel:,.2f} €")
 
-                    st.markdown("### 🧮 Comparatif Global ERP vs Fournisseurs")
+                    st.markdown("### 🧮 Comparatif Global ERP vs Fournisseurs (Reconstitution Réelle)")
                     k1, k2, k3 = st.columns(3)
                     k1.metric("Total ERP Extrait (Sewan)", f"{tot_simulation_artis_reel:,.2f} €")
-                    k2.metric("Total Reconstitution Annexes Sewan", f"{tot_fournisseurs_reel:,.2f} €")
+                    k2.metric("Total Réconcilié Annexes Sewan", f"{tot_fournisseurs_reel:,.2f} €")
                     
                     if abs(ecart_global_reel) < 1000.0:
                         k3.metric("Écart Net Global HT", f"{ecart_global_reel:,.2f} €", delta="🟢 Conforme (< 1 000 €)", delta_color="normal")
@@ -388,4 +370,4 @@ with onglet_ht:
                 except Exception as e:
                     st.error(f"Erreur pendant le traitement HT : {e}")
     else:
-        st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les annexes CSV / Excel.")
+        st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
