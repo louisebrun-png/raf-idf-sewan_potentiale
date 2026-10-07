@@ -18,7 +18,7 @@ st.caption("Audit Financier HT & Cohérence TVA Abonnements Fournisseurs")
 st.sidebar.header("📁 Importation des Documents")
 fichier_artis = st.sidebar.file_uploader("1. Simulation Achat Artis (.xlsx)", type=["xlsx"])
 fichier_ref = st.sidebar.file_uploader("2. Table de Correspondance (.xlsx)", type=["xlsx"])
-annexe_csv = st.sidebar.file_uploader("3. Annexe Fournisseur (.csv / .xlsx)", type=["csv", "xlsx"])
+annexes_csv = st.sidebar.file_uploader("3. Annexes Fournisseurs (.csv / .xlsx)", type=["csv", "xlsx"], accept_multiple_files=True)
 factures_pdf = st.sidebar.file_uploader("4. Factures PDF Sewan (Optionnel)", type=["pdf"], accept_multiple_files=True)
 
 def isoler_ref_article(libelle):
@@ -29,7 +29,7 @@ def isoler_ref_article(libelle):
 
 onglet_ht, onglet_tva = st.tabs(["📊 1. Analyse Quantité & Prix HT (Global)", "🚨 2. Audit Écarts TVA"])
 
-if fichier_artis and (annexe_csv or factures_pdf):
+if fichier_artis and (annexes_csv or factures_pdf):
     
     # --- ONGLET 1 : HT ---
     with onglet_ht:
@@ -43,30 +43,30 @@ if fichier_artis and (annexe_csv or factures_pdf):
                 
                 lignes_fourn = []
                 
-                # Traitement de l'Annexe CSV/Excel si présente
-                if annexe_csv:
-                    if annexe_csv.name.endswith('.csv'):
-                        df_annexe = pd.read_csv(annexe_csv, sep=None, engine='python')
-                    else:
-                        df_annexe = pd.read_excel(annexe_csv)
-                    
-                    # Détection automatique des colonnes clés
-                    col_ref = next((c for c in df_annexe.columns if any(k in c.lower() for k in ['ref', 'code', 'article'])), df_annexe.columns[0])
-                    col_montant = next((c for c in df_annexe.columns if any(k in c.lower() for k in ['montant', 'ht', 'prix', 'total'])), df_annexe.columns[1])
-                    col_client = next((c for c in df_annexe.columns if any(k in c.lower() for k in ['client', 'raison'])), df_annexe.columns[-1])
-                    
-                    for _, row in df_annexe.iterrows():
-                        ref = isoler_ref_article(str(row[col_ref]))
-                        try:
-                            m_ht = float(str(row[col_montant]).replace(',', '.').replace(' ', '').replace('€', ''))
-                        except ValueError:
-                            m_ht = 0.0
+                # Traitement de TOUTES les annexes CSV/Excel chargées
+                if annexes_csv:
+                    for annexe in annexes_csv:
+                        if annexe.name.endswith('.csv'):
+                            df_annexe = pd.read_csv(annexe, sep=None, engine='python')
+                        else:
+                            df_annexe = pd.read_excel(annexe)
                         
-                        lignes_fourn.append({
-                            'Code_Article_ERP': ref,
-                            'Montant_Sewan': m_ht,
-                            'Client_Sewan': str(row[col_client])
-                        })
+                        col_ref = next((c for c in df_annexe.columns if any(k in c.lower() for k in ['ref', 'code', 'article'])), df_annexe.columns[0])
+                        col_montant = next((c for c in df_annexe.columns if any(k in c.lower() for k in ['montant', 'ht', 'prix', 'total'])), df_annexe.columns[1])
+                        col_client = next((c for c in df_annexe.columns if any(k in c.lower() for k in ['client', 'raison'])), df_annexe.columns[-1])
+                        
+                        for _, row in df_annexe.iterrows():
+                            ref = isoler_ref_article(str(row[col_ref]))
+                            try:
+                                m_ht = float(str(row[col_montant]).replace(',', '.').replace(' ', '').replace('€', ''))
+                            except ValueError:
+                                m_ht = 0.0
+                            
+                            lignes_fourn.append({
+                                'Code_Article_ERP': ref,
+                                'Montant_Sewan': m_ht,
+                                'Client_Sewan': str(row[col_client])
+                            })
                 
                 # Complément par PDF si fournis
                 if factures_pdf:
@@ -210,4 +210,5 @@ if fichier_artis and (annexe_csv or factures_pdf):
                     type="primary"
                 )
 else:
-    st.info("👈 Veuillez charger la simulation Artis ERP ainsi que l'annexe CSV (ou les PDF) dans le menu latéral pour démarrer.")
+    st.info("👈 Veuillez charger la simulation Artis ERP ainsi que les annexes CSV (ou les PDF) dans le menu latéral pour démarrer.")
+    
