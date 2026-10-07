@@ -148,3 +148,151 @@ with onglet_ht:
                     col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis.columns else df_artis.columns[1]
                     df_artis_abonn['Montant_ERP'] = df_artis_abonn[col_m_artis].fillna(0.0)
                     df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip()
+                    
+                    tot_simulation_artis = df_artis_abonn['Montant_ERP'].sum()
+                    ecart_global = abs(tot_simulation_artis - tot_fournisseurs)
+
+                    col_qte_artis = next((c for c in df_artis_abonn.columns if any(k in c.lower() for k in ['nb bien', 'quantité', 'nb_bien', 'qte'])), None)
+                    if col_qte_artis:
+                        df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn[col_qte_artis], errors='coerce').fillna(1.0)
+                    else:
+                        df_artis_abonn['Quantite_ERP'] = 1.0
+
+                    # 3. Ingestion des annexes CSV
+                    lignes_fourn = []
+                    for annexe in annexes_csv:
+                        df_annexe = lire_csv_securise(annexe) if annexe.name.endswith('.csv') else pd.read_excel(annexe)
+                        cols = [str(c).lower().strip() for c in df_annexe.columns]
+                        
+                        idx_ref = next((i for i, c in enumerate(cols) if any(k in c for k in ['code produit', 'code_article', 'ref', 'code'])), 0)
+                        idx_m = next((i for i, c in enumerate(cols) if any(k in c for k in ["prix d'achat", 'prix', 'montant', 'ht'])), 1)
+                        idx_qte = next((i for i, c in enumerate(cols) if any(k in c for k in ['quantité', 'quantite', 'qte'])), -1)
+                        idx_cli = next((i for i, c in enumerate(cols) if any(k in c for k in ['client/revendeur', 'nom client', 'client', 'nom utilisateur'])), -1)
+                        
+                        col_ref = df_annexe.columns[idx_ref]
+                        col_montant = df_annexe.columns[idx_m]
+                        col_qte = df_annexe.columns[idx_qte] if idx_qte != -1 else None
+                        col_client = df_annexe.columns[idx_cli] if idx_cli != -1 else None
+                        
+                        for _, row in df_annexe.iterrows():
+                            ref = isoler_ref_article(str(row[col_ref]))
+                            try:
+                                m_ht = float(str(row[col_montant]).replace(',', '.').replace(' ', '').replace('€', ''))
+                            except ValueError:
+                                m_ht = 0.0
+                                
+                            try:
+                                q_sewan = float(str(row[col_qte]).replace(',', '.').replace(' ', '')) if col_qte else 1.0
+                            except ValueError:
+                                q_sewan = 1.0
+                            
+                            cli_raw = str(row[col_client]) if col_client else ""
+                            cli_code = extract_client_code(cli_raw)
+                            
+                            lignes_fourn.append({
+                                'Code_Client_Sewan': cli_code,
+                                'Code_Article_ERP': ref,
+                                'Montant_Sewan': m_ht,
+                                'Quantite_Sewan': q_sewan,
+                                'Client_Sewan_Raw': cli_raw
+                            })
+                            
+                    df_fourn = pd.DataFrame(lignes_fourn).groupby(['Code_Client_Sewan', 'Code_Article_ERP'], as_index=False).agg(
+                        Montant_Sewan=('Montant_Sewan', 'sum'),
+                        Quantite_Sewan=('Quantite_Sewan', 'sum'),
+                        Client_Sewan_Raw=('Client_Sewan_Raw', 'first')
+                    )
+                    
+                    df_recon = pd.merge(
+                        df_artis_abonn, 
+                        df_fourn, 
+                        left_on=['Code_Client_Str', 'Code_Article_ERP'], 
+                        right_on=['Code_Client_Sewan', 'Code_Article_ERP'], 
+                        how='outer'
+                    )
+                    
+                    df_recon['Montant_ERP'] = df_recon['Montant_ERP'].fillna(0.0).round(2)
+                    df_recon['Montant_Sewan'] = df_recon['Montant_Sewan'].fillna(0.0).round(2)
+                    df_recon['Quantite_ERP'] = df_recon['Quantite_ERP'].fillna(0.0)
+                    df_recon['Quantite_Sewan'] = df_recon['Quantite_Sewan'].fillna(0.0)
+                    df_recon['Ecart_HT'] = (df_recon['Montant_ERP'] - df_recon['Montant_Sewan']).round(2)
+                    
+                    def qualifier_ht_exact(row):
+                        if pd.isna(row.get(col_art_artis)):
+                            return "🔴 Absent simulation ERP"
+                        if pd.isna(row.get('Client_Sewan_Raw')) or row.get('Montant_Sewan', 0) == 0:
+                            return "🟠 Absent annexe fournisseur"
+                        if abs(row['Ecart_HT']) > 0.05:
+                            return "⚠️ Écart de montant HT"
+                        return "🟢 Conforme"
+
+                    df_recon['Diagnostic_RAF'] = df_recon.apply(qualifier_ht_exact, axis=1)
+
+                    # ----------------------------------------------------------
+                    # AFFICHAGE DES SYNTHÈSES EXÉCUTIVES
+                    # ----------------------------------------------------------
+                    st.markdown("### 📋 Synthèse des Factures Fournisseurs (Abonnements HT)")
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Toolip", f"{tot_toolip:,.2f} €")
+                    c2.metric("Sokatel", f"{tot_sokatel:,.2f} €")
+                    c3.metric("Nextphone", f"{tot_nextphone:,.2f} €")
+                    c4.metric("Total Fournisseurs", f"{tot_fournisseurs:,.2f} €")
+
+                    st.markdown("### 🧮 Comparatif Global ERP vs Fournisseurs")
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("Total Simulation Achat Artis ERP", f"{tot_simulation_artis:,.2f} €")
+                    k2.metric("Total Factures Sewan (Hors Conso)", f"{tot_fournisseurs:,.2f} €")
+                    
+                    if ecart_global < 1000.0:
+                        k3.metric("Écart Net HT", f"{ecart_global:,.2f} €", delta="🟢 Conforme (< 1 000 €)", delta_color="normal")
+                    else:
+                        k3.metric("Écart Net HT", f"{ecart_global:,.2f} €", delta="🟠 À expertiser (> 1 000 €)", delta_color="inverse")
+
+                    st.markdown("---")
+                    col_graph, col_stats = st.columns([1, 1])
+
+                    with col_stats:
+                        st.markdown("### 📊 Répartition par Diagnostic RAF")
+                        stats_df = df_recon['Diagnostic_RAF'].value_counts().reset_index()
+                        stats_df.columns = ['Statut Diagnostic', 'Nombre de Lignes']
+                        st.dataframe(stats_df, use_container_width=True)
+
+                    with col_graph:
+                        st.markdown("### 🍕 Taux de Conformité (% Conforme)")
+                        counts = df_recon['Diagnostic_RAF'].value_counts()
+                        labels = counts.index
+                        colors = {'🟢 Conforme': '#2ecc71', '⚠️ Écart de montant HT': '#e74c3c', '🟠 Absent annexe fournisseur': '#e67e22', '🔴 Absent simulation ERP': '#95a5a6'}
+                        col_list = [colors.get(l, '#3498db') for l in labels]
+                        
+                        fig, ax = plt.subplots(figsize=(5, 5))
+                        ax.pie(counts, labels=labels, autopct='%1.1f%%', startangle=90, colors=col_list)
+                        ax.axis('equal')
+                        st.pyplot(fig)
+
+                    st.markdown("---")
+                    st.markdown("### 🔍 Tableau Détaillé des Lignes d'Abonnements")
+
+                    if 'Raison sociale client' in df_recon.columns:
+                        df_recon['Raison sociale client'] = df_recon['Raison sociale client'].astype(str).str.slice(0, 20)
+                        
+                    cols_export_ht = [
+                        'Code client', 'Raison sociale client', 'Code SSC', 'Code RFC', 'Libellé RFC', 
+                        'Code_Article_ERP', 'Quantite_ERP', 'Quantite_Sewan', 
+                        'Montant_ERP', 'Montant_Sewan', 'Ecart_HT', 'Diagnostic_RAF'
+                    ]
+                    for c in cols_export_ht:
+                        if c not in df_recon.columns:
+                            df_recon[c] = "Non renseigné"
+                            
+                    df_res_ht = df_recon[cols_export_ht].drop_duplicates()
+                    
+                    buffer_ht = io.BytesIO()
+                    with pd.ExcelWriter(buffer_ht, engine='openpyxl') as writer:
+                        df_res_ht.to_excel(writer, index=False, sheet_name='Analyse_HT_Client_Article')
+                    
+                    st.dataframe(df_res_ht, use_container_width=True)
+                    st.download_button("📥 Télécharger l'Analyse HT Détaillée (.xlsx)", data=buffer_ht.getvalue(), file_name="Analyse_RAF_HT_Detaillee.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+                except Exception as e:
+                    st.error(f"Erreur pendant le traitement HT : {e}")
+    else:
+        st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les annexes CSV / Excel.")
