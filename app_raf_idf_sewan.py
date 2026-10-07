@@ -18,7 +18,8 @@ st.caption("Audit Financier HT & Cohérence TVA Abonnements Fournisseurs")
 st.sidebar.header("📁 Importation des Documents")
 fichier_artis = st.sidebar.file_uploader("1. Simulation Achat Artis (.xlsx)", type=["xlsx"])
 fichier_ref = st.sidebar.file_uploader("2. Table de Correspondance (.xlsx)", type=["xlsx"])
-factures_pdf = st.sidebar.file_uploader("3. Factures PDF Sewan (.pdf)", type=["pdf"], accept_multiple_files=True)
+annexe_csv = st.sidebar.file_uploader("3. Annexe Fournisseur (.csv / .xlsx)", type=["csv", "xlsx"])
+factures_pdf = st.sidebar.file_uploader("4. Factures PDF Sewan (Optionnel)", type=["pdf"], accept_multiple_files=True)
 
 def isoler_ref_article(libelle):
     if not isinstance(libelle, str):
@@ -28,7 +29,7 @@ def isoler_ref_article(libelle):
 
 onglet_ht, onglet_tva = st.tabs(["📊 1. Analyse Quantité & Prix HT (Global)", "🚨 2. Audit Écarts TVA"])
 
-if fichier_artis and factures_pdf:
+if fichier_artis and (annexe_csv or factures_pdf):
     
     # --- ONGLET 1 : HT ---
     with onglet_ht:
@@ -41,24 +42,52 @@ if fichier_artis and factures_pdf:
                 df_artis_abonn['Montant_ERP'] = df_artis_abonn['Coût ABONNEMENT facturé'].fillna(0.0)
                 
                 lignes_fourn = []
-                for pdf in factures_pdf:
-                    reader = pypdf.PdfReader(pdf)
-                    for page in reader.pages:
-                        text = page.extract_text() or ""
-                        lines = text.split('\n')
-                        for i, line in enumerate(lines):
-                            match = re.search(r'([0-9]{2}-[\d\-]+-[0-9]{2}-[MFUV])', line)
-                            if match:
-                                ref = match.group(1)
-                                montants = re.findall(r'\d+[\.,]\d{2}', line)
-                                m_ht = 0.0
-                                if montants:
-                                    m_ht = float(montants[-2].replace(',', '.')) if len(montants) >= 2 else float(montants[0].replace(',', '.'))
-                                lignes_fourn.append({
-                                    'Code_Article_ERP': ref,
-                                    'Montant_Sewan': m_ht,
-                                    'Client_Sewan': pdf.name.replace('.pdf', '')
-                                })
+                
+                # Traitement de l'Annexe CSV/Excel si présente
+                if annexe_csv:
+                    if annexe_csv.name.endswith('.csv'):
+                        df_annexe = pd.read_csv(annexe_csv, sep=None, engine='python')
+                    else:
+                        df_annexe = pd.read_excel(annexe_csv)
+                    
+                    # Détection automatique des colonnes clés
+                    col_ref = next((c for c in df_annexe.columns if any(k in c.lower() for k in ['ref', 'code', 'article'])), df_annexe.columns[0])
+                    col_montant = next((c for c in df_annexe.columns if any(k in c.lower() for k in ['montant', 'ht', 'prix', 'total'])), df_annexe.columns[1])
+                    col_client = next((c for c in df_annexe.columns if any(k in c.lower() for k in ['client', 'raison'])), df_annexe.columns[-1])
+                    
+                    for _, row in df_annexe.iterrows():
+                        ref = isoler_ref_article(str(row[col_ref]))
+                        try:
+                            m_ht = float(str(row[col_montant]).replace(',', '.').replace(' ', '').replace('€', ''))
+                        except ValueError:
+                            m_ht = 0.0
+                        
+                        lignes_fourn.append({
+                            'Code_Article_ERP': ref,
+                            'Montant_Sewan': m_ht,
+                            'Client_Sewan': str(row[col_client])
+                        })
+                
+                # Complément par PDF si fournis
+                if factures_pdf:
+                    for pdf in factures_pdf:
+                        reader = pypdf.PdfReader(pdf)
+                        for page in reader.pages:
+                            text = page.extract_text() or ""
+                            lines = text.split('\n')
+                            for line in lines:
+                                match = re.search(r'([0-9]{2}-[\d\-]+-[0-9]{2}-[MFUV])', line)
+                                if match:
+                                    ref = match.group(1)
+                                    montants = re.findall(r'\d+[\.,]\d{2}', line)
+                                    m_ht = 0.0
+                                    if montants:
+                                        m_ht = float(montants[-2].replace(',', '.')) if len(montants) >= 2 else float(montants[0].replace(',', '.'))
+                                    lignes_fourn.append({
+                                        'Code_Article_ERP': ref,
+                                        'Montant_Sewan': m_ht,
+                                        'Client_Sewan': pdf.name.replace('.pdf', '')
+                                    })
                                 
                 df_fourn = pd.DataFrame(lignes_fourn).groupby(['Code_Article_ERP', 'Client_Sewan'], as_index=False)['Montant_Sewan'].sum()
                 
@@ -127,23 +156,24 @@ if fichier_artis and factures_pdf:
                 df_artis_abonn['TVA_Artis'] = df_artis_abonn.apply(harmoniser_tva_artis, axis=1)
                 
                 lignes_tva = []
-                for pdf in factures_pdf:
-                    reader = pypdf.PdfReader(pdf)
-                    for page in reader.pages:
-                        text = page.extract_text() or ""
-                        lines = text.split('\n')
-                        for i, line in enumerate(lines):
-                            match = re.search(r'([0-9]{2}-[\d\-]+-[0-9]{2}-[MFUV])', line)
-                            if match:
-                                ref = match.group(1)
-                                tva_code = "APST (0%)"
-                                for j in range(i, min(i + 5, len(lines))):
-                                    if 'S (20%' in lines[j] or 'S (20,00%)' in lines[j]:
-                                        tva_code = "S (20%)"
-                                        break
-                                lignes_tva.append({'Code_Article_ERP': ref, 'TVA_Sewan': tva_code})
+                if factures_pdf:
+                    for pdf in factures_pdf:
+                        reader = pypdf.PdfReader(pdf)
+                        for page in reader.pages:
+                            text = page.extract_text() or ""
+                            lines = text.split('\n')
+                            for i, line in enumerate(lines):
+                                match = re.search(r'([0-9]{2}-[\d\-]+-[0-9]{2}-[MFUV])', line)
+                                if match:
+                                    ref = match.group(1)
+                                    tva_code = "APST (0%)"
+                                    for j in range(i, min(i + 5, len(lines))):
+                                        if 'S (20%' in lines[j] or 'S (20,00%)' in lines[j]:
+                                            tva_code = "S (20%)"
+                                            break
+                                    lignes_tva.append({'Code_Article_ERP': ref, 'TVA_Sewan': tva_code})
                                 
-                df_sewan_tva = pd.DataFrame(lignes_tva).drop_duplicates(subset=['Code_Article_ERP', 'TVA_Sewan'])
+                df_sewan_tva = pd.DataFrame(lignes_tva).drop_duplicates(subset=['Code_Article_ERP', 'TVA_Sewan']) if lignes_tva else pd.DataFrame(columns=['Code_Article_ERP', 'TVA_Sewan'])
                 df_merged_tva = pd.merge(df_artis_abonn, df_sewan_tva, on='Code_Article_ERP', how='inner')
                 df_errors_tva = df_merged_tva[df_merged_tva['TVA_Artis'] != df_merged_tva['TVA_Sewan']].copy()
                 df_errors_tva['Diagnostic_RAF'] = "🚨 Divergence TVA"
@@ -180,4 +210,4 @@ if fichier_artis and factures_pdf:
                     type="primary"
                 )
 else:
-    st.info("👈 Veuillez charger la simulation Artis ERP et les PDF Sewan dans le menu latéral pour démarrer.")
+    st.info("👈 Veuillez charger la simulation Artis ERP ainsi que l'annexe CSV (ou les PDF) dans le menu latéral pour démarrer.")
