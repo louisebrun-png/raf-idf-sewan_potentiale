@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Rapprochement Tiers Étendu)")
+st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Filtre Strict SEWAN)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -31,6 +31,12 @@ def clean_string_fuzzy(s):
     if not isinstance(s, str) or pd.isna(s):
         return ""
     return re.sub(r'[^a-zA-Z0-9]', '', str(s).lower())
+
+def extract_client_code(client_str):
+    if not isinstance(client_str, str) or pd.isna(client_str) or str(client_str).strip() in ['', 'nan', 'None', '-']:
+        return ""
+    m = re.match(r'^\s*([A-Za-z0-9_\-]+)', str(client_str))
+    return m.group(1).strip() if m else str(client_str).strip()
 
 def extract_param_key(text):
     if not isinstance(text, str) or pd.isna(text):
@@ -54,16 +60,22 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Détail Tiers & Flux)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Filtre Strict SEWAN)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
     st.subheader("Audit Fiscale TVA (STD 20% vs APST 0%)")
     if fichier_artis and factures_pdf:
         if st.button("🚨 Lancer l'Analyse TVA", type="primary", key="btn_tva"):
-            with st.spinner("Analyse du texte brut des factures PDF Sewan et vérification des RFC ERP..."):
+            with st.spinner("Analyse des factures PDF Sewan et vérification des RFC ERP..."):
                 try:
                     df_artis = pd.read_excel(fichier_artis)
+                    
+                    # Filtre strict SEWAN sur la colonne fournisseur ERP
+                    col_fourn_artis = next((c for c in df_artis.columns if 'ABONNEMENT' in c and ('fournisseur' in c.lower() or 'raison soc' in c.lower() or 'org' in c.lower())), None)
+                    if col_fourn_artis:
+                        df_artis = df_artis[df_artis[col_fourn_artis].astype(str).str.contains('SEWAN', case=False, na=False)].copy()
+
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
                     df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
@@ -121,13 +133,13 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT ET RAPPROCHEMENT TIERS ÉTENDU ---
+# --- ONGLET 2 : ANALYSE HT AVEC FILTRE STRICT SEWAN ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Rapprochement Tiers Étendu)")
+    st.subheader("Rapprochement Financier HT (Strict Périmètre SEWAN)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Traitement des {nb_annexes} annexes CSV/Excel et réconciliation étendue..."):
+            with st.spinner(f"Filtrage strict sur SEWAN et traitement des {nb_annexes} annexes CSV..."):
                 try:
                     tot_toolip = 15324.15
                     tot_sokatel = 10874.99
@@ -135,14 +147,18 @@ with onglet_ht:
                     tot_fournisseurs = tot_toolip + tot_sokatel + tot_nextphone
 
                     df_artis = pd.read_excel(fichier_artis)
+                    
+                    # FILTRE STRICT SEWAN DANS L'ERP
+                    col_fourn_artis = next((c for c in df_artis.columns if 'ABONNEMENT' in c and ('fournisseur' in c.lower() or 'raison soc' in c.lower() or 'org' in c.lower())), None)
+                    if col_fourn_artis:
+                        df_artis = df_artis[df_artis[col_fourn_artis].astype(str).str.contains('SEWAN', case=False, na=False)].copy()
+
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
                     df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
                     col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis_abonn.columns else df_artis.columns[1]
                     df_artis_abonn['Montant_ERP'] = df_artis_abonn[col_m_artis].fillna(0.0)
-                    
                     df_artis_abonn['Code_Client_Clean'] = df_artis_abonn['Code client'].apply(clean_string_fuzzy)
-                    df_artis_abonn['Name_Client_Clean'] = df_artis_abonn['Raison sociale client'].apply(clean_string_fuzzy)
                     df_artis_abonn['Param_Key'] = df_artis_abonn['Libellé RFC'].apply(extract_param_key)
 
                     tot_simulation_artis = 27787.45
@@ -192,15 +208,12 @@ with onglet_ht:
                                 q_sewan = 1.0
                             
                             cli_raw = str(row[col_client]) if col_client else ""
-                            m_code = re.match(r'^\s*([A-Za-z0-9_\-]+)\s*(.*)$', cli_raw)
-                            c_code = m_code.group(1).strip() if m_code else ""
-                            c_name = m_code.group(2).strip() if m_code else cli_raw.strip()
+                            cli_code = extract_client_code(cli_raw)
                             p1_val = str(row[col_param1]) if col_param1 else ""
                             param_key = extract_param_key(p1_val)
                             
                             lignes_fourn.append({
-                                'Code_Sewan_Clean': clean_string_fuzzy(c_code),
-                                'Name_Sewan_Clean': clean_string_fuzzy(c_name if c_name else cli_raw),
+                                'Code_Sewan_Clean': clean_string_fuzzy(cli_code),
                                 'Code_Article_ERP': ref,
                                 'Param_Key': param_key,
                                 'Montant_Sewan': m_ht,
@@ -208,32 +221,20 @@ with onglet_ht:
                                 'Client_Sewan_Raw': cli_raw
                             })
                             
-                    df_fourn = pd.DataFrame(lignes_fourn)
+                    df_fourn = pd.DataFrame(lignes_fourn).groupby(['Code_Sewan_Clean', 'Code_Article_ERP', 'Param_Key'], as_index=False).agg(
+                        Montant_Sewan=('Montant_Sewan', 'sum'),
+                        Quantite_Sewan=('Quantite_Sewan', 'sum'),
+                        Client_Sewan_Raw=('Client_Sewan_Raw', 'first')
+                    )
                     
-                    # 1er Match par Code Tiers + Article + Param1
-                    df_recon_1 = pd.merge(
+                    df_recon = pd.merge(
                         df_artis_abonn, 
                         df_fourn, 
                         left_on=['Code_Client_Clean', 'Code_Article_ERP', 'Param_Key'], 
                         right_on=['Code_Sewan_Clean', 'Code_Article_ERP', 'Param_Key'], 
-                        how='left'
+                        how='outer'
                     )
-
-                    # 2ème Match de secours par Raison Sociale Tiers + Article + Param1 pour les non-rapprochés
-                    unmatched_mask = df_recon_1['Montant_Sewan'].isna()
-                    if unmatched_mask.any():
-                        df_unmatched = df_recon_1[unmatched_mask].drop(columns=['Code_Sewan_Clean', 'Name_Sewan_Clean', 'Montant_Sewan', 'Quantite_Sewan', 'Client_Sewan_Raw'])
-                        df_recon_2 = pd.merge(
-                            df_unmatched,
-                            df_fourn,
-                            left_on=['Name_Client_Clean', 'Code_Article_ERP', 'Param_Key'],
-                            right_on=['Name_Sewan_Clean', 'Code_Article_ERP', 'Param_Key'],
-                            how='left'
-                        )
-                        df_recon = pd.concat([df_recon_1[~unmatched_mask], df_recon_2], ignore_index=True)
-                    else:
-                        df_recon = df_recon_1.copy()
-
+                    
                     df_recon['Montant_ERP'] = df_recon['Montant_ERP'].fillna(0.0).round(2)
                     df_recon['Montant_Sewan'] = df_recon['Montant_Sewan'].fillna(0.0).round(2)
                     df_recon['Quantite_ERP'] = df_recon['Quantite_ERP'].fillna(0.0)
@@ -243,7 +244,7 @@ with onglet_ht:
                     def qualifier_ht_exact(row):
                         if row['Montant_ERP'] == 0.0 and row['Montant_Sewan'] == 0.0:
                             return "🟢 Conforme (Option 0€)"
-                        if pd.isna(row.get(col_art_artis)):
+                        if pd.isna(row.get(col_art_artis)) or str(row.get(col_art_artis)).strip() in ['', 'nan']:
                             return "🔴 Vente récente non saisie ERP"
                         if pd.isna(row.get('Client_Sewan_Raw')) or row.get('Montant_Sewan', 0) == 0:
                             return "🟠 Résiliation non saisie ERP"
