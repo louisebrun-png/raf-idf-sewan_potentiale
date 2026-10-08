@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement Financier HT (Cascade Tiers & Fallback Client 10)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Alignement Strict Produit Sewan == Libellé RFC ERP)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -22,10 +22,10 @@ factures_pdf = st.sidebar.file_uploader("3. Factures PDF Sewan (Obligatoire TVA)
 annexes_csv = st.sidebar.file_uploader("4. Annexes Fournisseurs (.csv / .xlsx)", type=["csv", "xlsx"], accept_multiple_files=True)
 
 def isoler_ref_article(libelle):
-    if not isinstance(libelle, str):
+    if not isinstance(libelle, str) or pd.isna(libelle):
         return ""
-    match = re.search(r'([0-9]{2}-[\d\-]+-[0-9]{2}-[MFUV])', libelle)
-    return match.group(1) if match else libelle.split(' - ')[0].strip()
+    match = re.search(r'([0-9]{2}-[\d\-]+-[0-9]{2}-[MFUV])', str(libelle))
+    return match.group(1) if match else str(libelle).split(' - ')[0].strip()
 
 def clean_string_fuzzy(s):
     if not isinstance(s, str) or pd.isna(s):
@@ -59,7 +59,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Cascade Tiers & Fallback 10)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Matching Produit / Libellé RFC)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -126,13 +126,13 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC CASCADE TIERS MULTI-COLONNES & FALLBACK CLIENT 10 ---
+# --- ONGLET 2 : ANALYSE HT AVEC MATCHING COMPTE GROUPE (PRODUIT SEWAN == LIBELLÉ RFC ERP) ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Cascade Tiers Multi-Colonnes & Fallback Client 10)")
+    st.subheader("Rapprochement Financier HT (Matching Produit Sewan == Libellé RFC ERP)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Traitement sur {nb_annexes} annexes CSV..."):
+            with st.spinner(f"Traitement et alignement sur {nb_annexes} annexes CSV..."):
                 try:
                     # 1. Table de correspondance Tiers
                     client_map = {}
@@ -231,7 +231,7 @@ with onglet_ht:
                             p2_val = str(row[col_param2]) if col_param2 else ""
                             prod_val = str(row[col_produit]).strip() if col_produit and pd.notna(row[col_produit]) else ""
                             
-                            # RECHERCHE TIERS MULTI-COLONNES : Réf Client ➔ Nom ➔ Param1 ➔ Param2
+                            # RESOLUTION TIERS MULTI-COLONNES : Réf Client ➔ Nom ➔ Param1 ➔ Param2
                             res_code = ""
                             for test_val in [c1_str, c2_str, p1_val, p2_val]:
                                 if test_val.lower() in client_map:
@@ -282,8 +282,7 @@ with onglet_ht:
                         how='outer'
                     )
 
-                    # 2. FILET DE SÉCURITÉ SPÉCIFIQUE : CLIENT 10 / AFIDF-10 / NON RAPPROCHÉS
-                    # Compare le Code Produit ERP + Libellé RFC avec le Produit Sewan
+                    # 2. FILET DE SÉCURITÉ ULTIME : CLIENT 10 / AFIDF-10 / FALLBACK PRODUIT SEWAN == LIBELLÉ RFC ERP
                     mask_c10_orphelin = (
                         df_recon_1['Montant_Sewan'].isna() | df_recon_1['Montant_ERP'].isna()
                     ) & (
@@ -299,6 +298,7 @@ with onglet_ht:
                         
                         df_sewan_c10_unmatched = df_fourn[df_fourn['Code_Client_Resolu'] == '10']
                         
+                        # MATCH EXACT ENTRE LIBELLÉ RFC ERP ET PRODUIT SEWAN (COL. F)
                         df_recon_fallback = pd.merge(
                             df_erp_c10_unmatched,
                             df_sewan_c10_unmatched,
@@ -311,7 +311,6 @@ with onglet_ht:
                             matched_rfcs = df_recon_fallback['Libelle_RFC_Clean'].unique()
                             matched_prods = df_recon_fallback['Produit_Sewan_Clean'].unique()
                             
-                            # On retire les orphelins ERP et Sewan désormais associés
                             df_recon_base = df_recon_1[
                                 ~(df_recon_1['Libelle_RFC_Clean'].isin(matched_rfcs) & df_recon_1['Montant_Sewan'].isna()) &
                                 ~(df_recon_1['Produit_Sewan_Clean'].isin(matched_prods) & df_recon_1['Montant_ERP'].isna())
