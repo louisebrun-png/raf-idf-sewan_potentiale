@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Matching Produit / Libellé RFC)")
+st.caption("Audit Fiscale TVA & Rapprochement Financier HT (Alignement Direct Produit / Libellé RFC)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -59,7 +59,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Rapprochement Compte Groupe)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Rapprochement Fusionné)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -126,13 +126,13 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC MATCHING COMPTE GROUPE (CODE 10) ---
+# --- ONGLET 2 : ANALYSE HT AVEC RAPPROCHEMENT COMPTE GROUPE ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Matching Produit / Libellé RFC)")
+    st.subheader("Rapprochement Financier HT (Matching Compte Groupe Koesio IDF)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Analyse et réconciliation de {nb_annexes} annexes..."):
+            with st.spinner(f"Traitement sur {nb_annexes} annexes CSV..."):
                 try:
                     # 1. Table de correspondance Tiers
                     client_map = {}
@@ -173,6 +173,8 @@ with onglet_ht:
                     df_artis_abonn['Montant_ERP'] = df_artis_abonn[col_m_artis].fillna(0.0)
                     df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip()
                     df_artis_abonn['Name_Client_Clean'] = df_artis_abonn['Raison sociale client'].apply(clean_string_fuzzy)
+                    
+                    # Clé Réseau principale (Param1) + Clé Libellé RFC de secours pour Artis ERP
                     df_artis_abonn['Param_Key'] = df_artis_abonn['Libellé RFC'].apply(extract_param_key_strict)
                     df_artis_abonn['Libelle_RFC_Clean'] = df_artis_abonn['Libellé RFC'].apply(clean_string_fuzzy)
 
@@ -250,11 +252,14 @@ with onglet_ht:
                             cli_raw = c1_str if c1_str else (c2_str if c2_str else p1_val)
                             param_key = extract_param_key_strict(p1_val)
                             
+                            # Clé Réseau Sewan : Param1 si présent, sinon fallback sur la colonne Produit nettoyée
+                            sewan_key = param_key if param_key else clean_string_fuzzy(prod_val)
+                            
                             lignes_fourn.append({
                                 'Code_Client_Resolu': res_code if res_code else "10",
                                 'Name_Sewan_Clean': clean_string_fuzzy(cli_raw),
                                 'Code_Article_ERP': ref,
-                                'Param_Key': param_key,
+                                'Param_Key': sewan_key,
                                 'Produit_Sewan_Clean': clean_string_fuzzy(prod_val),
                                 'Montant_Sewan': m_ht,
                                 'Quantite_Sewan': q_sewan,
@@ -278,11 +283,12 @@ with onglet_ht:
                         how='outer'
                     )
 
-                    # PASSAGE 2 : FALLBACK SUR COMPTE FOURRE-TOUT (CODE 10 KOESIO IDF & LIBELLÉ RFC == PRODUIT)
+                    # PASSAGE 2 : FALLBACK EXCLUSIF SUR COMPTE GROUPE (CODE 10 KOESIO IDF & LIBELLÉ RFC == PRODUIT)
                     unmatched_10 = df_recon_1['Montant_Sewan'].isna() & (df_recon_1['Code_Client_Str'] == '10')
                     if unmatched_10.any():
                         df_orphan_erp = df_recon_1[unmatched_10].drop(columns=['Code_Client_Resolu', 'Name_Sewan_Clean', 'Montant_Sewan', 'Quantite_Sewan', 'Client_Sewan_Raw', 'Annexe_Source', 'Produit_Sewan_Clean'], errors='ignore')
                         
+                        # Match dynamique Libellé RFC (ERP) vs Produit (Sewan)
                         df_matched_fallback = pd.merge(
                             df_orphan_erp,
                             df_fourn[df_fourn['Code_Client_Resolu'] == '10'],
@@ -293,10 +299,10 @@ with onglet_ht:
                         
                         if not df_matched_fallback.empty:
                             matched_rfc_keys = df_matched_fallback['Libelle_RFC_Clean'].unique()
-                            # Suppression des orphelins ERP ayant trouvé leur correspondance produit
+                            # Nettoyage des orphelins ERP appariés
                             df_recon_base = df_recon_1[~(df_recon_1['Libelle_RFC_Clean'].isin(matched_rfc_keys) & df_recon_1['Montant_Sewan'].isna())]
                             
-                            # Suppression des doublons Sewan réassignés
+                            # Nettoyage des doublons Sewan réassignés
                             matched_sewan_prods = df_matched_fallback['Produit_Sewan_Clean'].unique()
                             df_recon_base = df_recon_base[~(df_recon_base['Produit_Sewan_Clean'].isin(matched_sewan_prods) & df_recon_base['Montant_ERP'].isna())]
                             
