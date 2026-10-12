@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Version Sécurisée & Correcte)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Calcul Explicit : Quantité ERP x PU = Montant Total ERP)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -62,7 +62,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Version Conforme)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Calcul Montant Total ERP)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -129,9 +129,9 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT RESTAURÉE ET SÉCURISÉE ---
+# --- ONGLET 2 : ANALYSE HT AVEC CALCUL MULTIPLICATIF MONTANT TOTAL ERP ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Alignement Tiers & Libellés Produits)")
+    st.subheader("Rapprochement Financier HT (Montant Total ERP = Quantité ERP x PU ERP)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
@@ -155,28 +155,16 @@ with onglet_ht:
                                     if m:
                                         client_map[m.group(1).lower()] = artis_code
 
-                    tot_toolip = 15324.15
-                    tot_sokatel = 10874.99
-                    tot_nextphone = 1981.41
-                    tot_fournisseurs = tot_toolip + tot_sokatel + tot_nextphone
-
                     df_artis = pd.read_excel(fichier_artis)
-                    
-                    # FILTRAGE SEWAN SÉCURISÉ (Ne vide jamais le jeu de données)
-                    col_fourn = next((c for c in df_artis.columns if 'fourn' in str(c).lower() or 'org' in str(c).lower() or 'raison' in str(c).lower()), None)
-                    if col_fourn:
-                        df_sewan = df_artis[df_artis[col_fourn].astype(str).str.contains('SEWAN', case=False, na=False)].copy()
-                        if not df_sewan.empty:
-                            df_artis = df_sewan
 
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
                     df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
                     df_artis_abonn = df_artis_abonn[~df_artis_abonn['Code_Article_ERP'].str.endswith('-F')].copy()
 
-                    # Montant Direct
+                    # Extraction du Prix Unitaire ERP
                     col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis_abonn.columns else df_artis.columns[1]
-                    df_artis_abonn['Montant_ERP'] = pd.to_numeric(df_artis_abonn[col_m_artis], errors='coerce').fillna(0.0).round(2)
+                    df_artis_abonn['PU_ERP'] = pd.to_numeric(df_artis_abonn[col_m_artis], errors='coerce').fillna(0.0)
                     
                     df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip()
                     df_artis_abonn['Name_Client_Clean'] = df_artis_abonn['Raison sociale client'].apply(clean_string_fuzzy)
@@ -190,7 +178,7 @@ with onglet_ht:
 
                     df_artis_abonn['Libelle_RFC_Clean'] = df_artis_abonn['Libellé RFC'].apply(extract_product_from_rfc)
 
-                    # Quantité FA
+                    # Quantité ERP via Colonne FA (Abonnement Nombre)
                     col_qte_fa = next((c for c in df_artis_abonn.columns if 'Abonnement Nombre' in str(c) or 'nt Nombre' in str(c) or str(c).endswith('Nombre')), None)
                     if col_qte_fa:
                         df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn[col_qte_fa], errors='coerce').fillna(1.0)
@@ -198,6 +186,9 @@ with onglet_ht:
                         df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn.iloc[:, 146], errors='coerce').fillna(1.0)
                     else:
                         df_artis_abonn['Quantite_ERP'] = 1.0
+
+                    # CALCUL EXPLICITE : MONTANT TOTAL ERP = QUANTITÉ ERP * PU ERP
+                    df_artis_abonn['Montant_Total_ERP'] = (df_artis_abonn['Quantite_ERP'] * df_artis_abonn['PU_ERP']).round(2)
 
                     lignes_fourn = []
                     for annexe in annexes_csv:
@@ -299,7 +290,7 @@ with onglet_ht:
 
                     # 2. FILET DE SÉCURITÉ : CLIENT 10 / AFIDF-10
                     mask_c10_orphelin = (
-                        df_recon_1['Montant_Sewan'].isna() | df_recon_1['Montant_ERP'].isna()
+                        df_recon_1['Montant_Sewan'].isna() | df_recon_1['Montant_Total_ERP'].isna()
                     ) & (
                         (df_recon_1['Code_Client_Str'] == '10') | 
                         (df_recon_1['Code SSC'].astype(str).str.contains('AFIDF-10', case=False, na=False))
@@ -327,7 +318,7 @@ with onglet_ht:
                             
                             df_recon_base = df_recon_1[
                                 ~(df_recon_1['Libelle_RFC_Clean'].isin(matched_rfcs) & df_recon_1['Montant_Sewan'].isna()) &
-                                ~(df_recon_1['Produit_Sewan_Clean'].isin(matched_prods) & df_recon_1['Montant_ERP'].isna())
+                                ~(df_recon_1['Produit_Sewan_Clean'].isin(matched_prods) & df_recon_1['Montant_Total_ERP'].isna())
                             ]
                             
                             df_recon = pd.concat([df_recon_base, df_recon_fallback], ignore_index=True)
@@ -336,15 +327,17 @@ with onglet_ht:
                     else:
                         df_recon = df_recon_1.copy()
 
-                    df_recon['Montant_ERP'] = df_recon['Montant_ERP'].fillna(0.0).round(2)
+                    df_recon['Montant_Total_ERP'] = df_recon['Montant_Total_ERP'].fillna(0.0).round(2)
                     df_recon['Montant_Sewan'] = df_recon['Montant_Sewan'].fillna(0.0).round(2)
                     df_recon['Quantite_ERP'] = df_recon['Quantite_ERP'].fillna(0.0)
                     df_recon['Quantite_Sewan'] = df_recon['Quantite_Sewan'].fillna(0.0)
+                    df_recon['PU_ERP'] = df_recon['PU_ERP'].fillna(0.0).round(2)
                     
-                    df_recon['Ecart_HT'] = (df_recon['Montant_ERP'] - df_recon['Montant_Sewan']).round(2)
+                    # ÉCART CALCULÉ SUR LE MONTANT TOTAL HT
+                    df_recon['Ecart_HT'] = (df_recon['Montant_Total_ERP'] - df_recon['Montant_Sewan']).round(2)
                     
                     def qualifier_ht_exact(row):
-                        if row['Montant_ERP'] == 0.0 and row['Montant_Sewan'] == 0.0:
+                        if row['Montant_Total_ERP'] == 0.0 and row['Montant_Sewan'] == 0.0:
                             return "🟢 Conforme (Option 0€)"
                         if pd.isna(row.get(col_art_artis)) or str(row.get(col_art_artis)).strip() in ['', 'nan']:
                             return "🔴 Vente récente non saisie ERP"
@@ -362,7 +355,7 @@ with onglet_ht:
                         df_recon['Raison sociale client'] = df_recon['Raison sociale client'].fillna(df_recon['Client_Sewan_Raw'])
 
                     # CALCUL DYNAMIQUE TOTALS
-                    tot_simulation_artis_reel = df_recon['Montant_ERP'].sum()
+                    tot_simulation_artis_reel = df_recon['Montant_Total_ERP'].sum()
                     tot_fournisseurs_reel = df_recon['Montant_Sewan'].sum()
                     ecart_global_reel = tot_simulation_artis_reel - tot_fournisseurs_reel
 
@@ -392,7 +385,7 @@ with onglet_ht:
 
                     diag_stats_full = df_recon.groupby('Diagnostic_RAF').agg(
                         Nombre_Lignes=('Diagnostic_RAF', 'count'),
-                        Total_Artis_ERP=('Montant_ERP', 'sum'),
+                        Total_Artis_ERP=('Montant_Total_ERP', 'sum'),
                         Total_Sewan_Fournisseur=('Montant_Sewan', 'sum'),
                         Total_Ecart_HT=('Ecart_HT', 'sum')
                     ).reset_index()
@@ -416,7 +409,7 @@ with onglet_ht:
                     cols_export_ht = [
                         'Code client', 'Raison sociale client', 'Code SSC', 'Code RFC', 'Libellé RFC', 
                         'Code_Article_ERP', 'Produit', 'Quantite_ERP', 'Quantite_Sewan', 
-                        'Montant_ERP', 'Montant_Sewan', 'Ecart_HT', 'Diagnostic_RAF', 'Annexe_Source'
+                        'PU_ERP', 'Montant_Total_ERP', 'Montant_Sewan', 'Ecart_HT', 'Diagnostic_RAF', 'Annexe_Source'
                     ]
                     for c in cols_export_ht:
                         if c not in df_recon.columns:
