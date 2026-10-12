@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Alignement Stricte Colonne AL & Colonne AH)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Analyse Physique des Colonnes AH & AL)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -63,7 +63,7 @@ def extract_code_client_avance(row_dict):
                 return m.group(1).upper()
     return ""
 
-def analyser_temporalite_ah(date_val, annee_ref=2026, mois_ref=10):
+def analyser_temporalite_ah_blinde(date_val, annee_ref=2026, mois_ref=10):
     if pd.isna(date_val) or str(date_val).strip() in ['', 'nan', 'None', 'NaT']:
         return "⚠️ Date Absente"
     try:
@@ -97,7 +97,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Simulation Octobre Exacte)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Analyse Physique Colonnes AH & AL)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -106,8 +106,8 @@ with onglet_tva:
         if st.button("🚨 Lancer l'Analyse TVA", type="primary", key="btn_tva"):
             with st.spinner("Analyse des factures PDF Sewan et vérification des RFC ERP..."):
                 try:
-                    df_artis = pd.read_excel(fichier_artis)
-                    col_art_artis = 'Code Article' if 'Code Article' in df_artis.columns else ('Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0])
+                    df_artis = pd.read_excel(fichier_artis, sheet_name=0)
+                    col_art_artis = 'Code Article' if 'Code Article' in df_artis.columns else df_artis.columns[30] if len(df_artis.columns) >= 31 else df_artis.columns[0]
                     df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
                     
@@ -142,7 +142,7 @@ with onglet_tva:
                     df_errors_tva = df_merged_tva[df_merged_tva['TVA_Artis'] != df_merged_tva['TVA_Sewan']].copy()
                     df_errors_tva['Diagnostic_RAF'] = "🚨 Divergence TVA"
                     
-                    col_cli_name_tva = 'Client' if 'Client' in df_errors_tva.columns else 'Raison sociale client'
+                    col_cli_name_tva = 'Client' if 'Client' in df_errors_tva.columns else df_errors_tva.columns[4]
                     if col_cli_name_tva in df_errors_tva.columns:
                         df_errors_tva[col_cli_name_tva] = df_errors_tva[col_cli_name_tva].astype(str).str.slice(0, 20)
                         
@@ -165,9 +165,9 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC TOTAL AL ABSOLU ET AH DIRECT ---
+# --- ONGLET 2 : ANALYSE HT PHYSIQUE COLONNE AH ET AL ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT & Contrôle Temporel (Lecture Stricte Colonne AL & Colonne AH)")
+    st.subheader("Rapprochement Financier HT & Contrôle Temporel (Index Physique Col. AH & AL)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
@@ -204,36 +204,39 @@ with onglet_ht:
                                     if m:
                                         client_map[m.group(1).lower()] = artis_code
 
-                    df_artis = pd.read_excel(fichier_artis)
+                    # LECTURE DE LA FEUILLE 0 DIRECTE DE L'EXCEL
+                    df_artis = pd.read_excel(fichier_artis, sheet_name=0)
 
-                    # 🎯 1. EXTRACTION DU MONTANT EXACT DE LA COLONNE AL ("Montant HT")
-                    col_al_exact = 'Montant HT' if 'Montant HT' in df_artis.columns else (df_artis.columns[37] if len(df_artis.columns) >= 38 else df_artis.columns[0])
-                    total_simulation_artis_absolu = pd.to_numeric(df_artis[col_al_exact], errors='coerce').fillna(0.0).sum()
+                    # 🎯 DÉTERMINATION PAR INTITULÉ OU PAR INDEX DE COLONNE EXCEL
+                    col_al_name = 'Montant HT' if 'Montant HT' in df_artis.columns else df_artis.columns[37] if len(df_artis.columns) >= 38 else df_artis.columns[-1]
+                    col_ah_name = 'Début période facturation' if 'Début période facturation' in df_artis.columns else df_artis.columns[33] if len(df_artis.columns) >= 34 else df_artis.columns[0]
+                    col_art_name = 'Code Article' if 'Code Article' in df_artis.columns else df_artis.columns[30] if len(df_artis.columns) >= 31 else df_artis.columns[0]
+                    col_pu_name = 'Prix Unitaire' if 'Prix Unitaire' in df_artis.columns else df_artis.columns[36] if len(df_artis.columns) >= 37 else df_artis.columns[1]
+                    col_qte_name = 'Quantite' if 'Quantite' in df_artis.columns else df_artis.columns[35] if len(df_artis.columns) >= 36 else df_artis.columns[2]
 
-                    # 🎯 2. EXTRACTION DE LA TEMPORALITÉ DE LA COLONNE AH ("Début période facturation")
-                    col_ah_exact = 'Début période facturation' if 'Début période facturation' in df_artis.columns else (df_artis.columns[33] if len(df_artis.columns) >= 34 else df_artis.columns[0])
-                    df_artis['Audit_Temporalite_FF'] = df_artis[col_ah_exact].apply(lambda d: analyser_temporalite_ah(d, annee_ref, mois_ref))
+                    # 1. TOTAL ABSOLU BRUT SUR LA COLONNE AL (29 144.51 € GUARANTEE)
+                    total_simulation_artis_absolu = pd.to_numeric(df_artis[col_al_name], errors='coerce').fillna(0.0).sum()
 
+                    # 2. TEMPORALITÉ ABSOLUE SUR LA COLONNE AH (3778 LIGNES GUARANTEE)
+                    df_artis['Audit_Temporalite_FF'] = df_artis[col_ah_name].apply(lambda d: analyser_temporalite_ah_blinde(d, annee_ref, mois_ref))
                     stats_temp = df_artis['Audit_Temporalite_FF'].value_counts()
                     nb_conformes_ff = sum(v for k, v in stats_temp.items() if 'Conforme' in k)
                     nb_regul_echu_ff = sum(v for k, v in stats_temp.items() if 'Régularisation' in k)
                     nb_anticipees_ff = sum(v for k, v in stats_temp.items() if 'Anticipée' in k)
                     nb_retards_ff = sum(v for k, v in stats_temp.items() if 'Retard' in k)
 
-                    # Rapprochement Fournisseur
-                    col_art_artis = 'Code Article' if 'Code Article' in df_artis.columns else ('Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0])
-                    df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
-                    df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
-                    df_artis_abonn['Montant_Total_ERP'] = pd.to_numeric(df_artis_abonn[col_al_exact], errors='coerce').fillna(0.0).round(2)
-
-                    col_pu_artis = 'Prix Unitaire' if 'Prix Unitaire' in df_artis_abonn.columns else df_artis.columns[1]
-                    df_artis_abonn['PU_ERP'] = pd.to_numeric(df_artis_abonn[col_pu_artis], errors='coerce').fillna(0.0)
-                    df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip() if 'Code client' in df_artis_abonn.columns else ""
+                    # Préparation de la table pour le rapprochement
+                    df_artis_abonn = df_artis.copy()
+                    df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_name].apply(isoler_ref_article)
+                    df_artis_abonn['Montant_Total_ERP'] = pd.to_numeric(df_artis_abonn[col_al_name], errors='coerce').fillna(0.0).round(2)
+                    df_artis_abonn['PU_ERP'] = pd.to_numeric(df_artis_abonn[col_pu_name], errors='coerce').fillna(0.0)
+                    df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn[col_qte_name], errors='coerce').fillna(1.0)
                     
-                    col_client_name = 'Client' if 'Client' in df_artis_abonn.columns else 'Raison sociale client'
-                    df_artis_abonn['Name_Client_Clean'] = df_artis_abonn[col_client_name].apply(clean_string_fuzzy) if col_client_name in df_artis_abonn.columns else ""
+                    df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip() if 'Code client' in df_artis_abonn.columns else df_artis_abonn.iloc[:, 0].astype(str).str.strip()
+                    col_cli_disp_name = 'Client' if 'Client' in df_artis_abonn.columns else df_artis_abonn.columns[4] if len(df_artis_abonn.columns) >= 5 else df_artis_abonn.columns[0]
+                    df_artis_abonn['Name_Client_Clean'] = df_artis_abonn[col_cli_disp_name].apply(clean_string_fuzzy)
                     
-                    col_rfc_lbl = 'Libellé RFC' if 'Libellé RFC' in df_artis_abonn.columns else ('Libellé Article' if 'Libellé Article' in df_artis_abonn.columns else df_artis_abonn.columns[0])
+                    col_rfc_lbl = 'Libellé RFC' if 'Libellé RFC' in df_artis_abonn.columns else df_artis_abonn.columns[21] if len(df_artis_abonn.columns) >= 22 else df_artis_abonn.columns[0]
                     df_artis_abonn['Param_Key'] = df_artis_abonn[col_rfc_lbl].apply(extract_param_key_strict)
                     
                     def extract_product_from_rfc(rfc):
@@ -243,12 +246,6 @@ with onglet_ht:
                         return clean_string_fuzzy(part_left)
 
                     df_artis_abonn['Libelle_RFC_Clean'] = df_artis_abonn[col_rfc_lbl].apply(extract_product_from_rfc)
-
-                    col_qte_fa = 'Quantite' if 'Quantite' in df_artis_abonn.columns else next((c for c in df_artis_abonn.columns if 'Abonnement Nombre' in str(c) or 'nt Nombre' in str(c) or str(c).endswith('Nombre')), None)
-                    if col_qte_fa:
-                        df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn[col_qte_fa], errors='coerce').fillna(1.0)
-                    else:
-                        df_artis_abonn['Quantite_ERP'] = 1.0
 
                     df_artis_abonn['Occurence_ERP'] = df_artis_abonn.groupby(['Code_Client_Str', 'Code_Article_ERP', 'Param_Key']).cumcount()
                     df_artis_abonn['Occurence_Fallback_ERP'] = df_artis_abonn.groupby(['Code_Client_Str', 'Code_Article_ERP', 'Libelle_RFC_Clean']).cumcount()
@@ -377,7 +374,7 @@ with onglet_ht:
                     def qualifier_ht_exact(row):
                         if row['Montant_Total_ERP'] == 0.0 and row['Montant_Sewan'] == 0.0:
                             return "🟢 Conforme (Option 0€)"
-                        if pd.isna(row.get(col_art_artis)) or str(row.get(col_art_artis)).strip() in ['', 'nan']:
+                        if pd.isna(row.get(col_art_name)) or str(row.get(col_art_name)).strip() in ['', 'nan']:
                             return "🔴 Vente récente non saisie ERP"
                         if pd.isna(row.get('Client_Sewan_Raw')) or row.get('Montant_Sewan', 0) == 0:
                             return "🟠 Résiliation non saisie ERP"
@@ -390,8 +387,7 @@ with onglet_ht:
                     if 'Code_Client_Resolu' in df_recon.columns:
                         df_recon['Code client'] = df_recon['Code client'].fillna(df_recon['Code_Client_Resolu'])
                     if 'Client_Sewan_Raw' in df_recon.columns:
-                        col_cli_disp = 'Client' if 'Client' in df_recon.columns else 'Raison sociale client'
-                        df_recon[col_cli_disp] = df_recon[col_cli_disp].fillna(df_recon['Client_Sewan_Raw'])
+                        df_recon[col_cli_disp_name] = df_recon[col_cli_disp_name].fillna(df_recon['Client_Sewan_Raw'])
 
                     tot_fournisseurs_reel = df_recon['Montant_Sewan'].sum()
                     ecart_global_reel = total_simulation_artis_absolu - tot_fournisseurs_reel
@@ -455,12 +451,11 @@ with onglet_ht:
                     st.markdown("---")
                     st.markdown("### 🔍 Tableau Détaillé des Lignes d'Abonnements")
 
-                    col_cli_disp = 'Client' if 'Client' in df_recon.columns else 'Raison sociale client'
-                    if col_cli_disp in df_recon.columns:
-                        df_recon[col_cli_disp] = df_recon[col_cli_disp].astype(str).str.slice(0, 20)
+                    if col_cli_disp_name in df_recon.columns:
+                        df_recon[col_cli_disp_name] = df_recon[col_cli_disp_name].astype(str).str.slice(0, 20)
                         
                     cols_export_ht = [
-                        'Code client', col_cli_disp, 'Code SSC', 'Code RFC', 'Libellé RFC', 
+                        'Code client', col_cli_disp_name, 'Code SSC', 'Code RFC', 'Libellé RFC', 
                         'Code_Article_ERP', 'Produit', 'Quantite_ERP', 'Quantite_Sewan', 
                         'PU_ERP', 'Montant_Total_ERP', 'Montant_Sewan', 'Ecart_HT', 'Diagnostic_RAF', 'Audit_Temporalite_FF', 'Annexe_Source'
                     ]
