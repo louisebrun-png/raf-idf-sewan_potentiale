@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Filtre Strict 'Coût ABONNEMENT raison sociale org')")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Consolidation Stricte Totaux ERP & Sewan)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -62,7 +62,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Filtre Raison Sociale Org)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Consolidation Totaux)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -129,9 +129,9 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC FILTRAGE SUR "Coût ABONNEMENT raison sociale org" ---
+# --- ONGLET 2 : ANALYSE HT AVEC TOTALS ERP EXACTS SANS GONFLEMENT ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Filtrage Strict 'Coût ABONNEMENT raison sociale org')")
+    st.subheader("Rapprochement Financier HT (Consolidation Stricte Totaux ERP & Sewan)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
@@ -162,17 +162,11 @@ with onglet_ht:
 
                     df_artis = pd.read_excel(fichier_artis)
                     
-                    # --- CIBLAGE ET FILTRAGE EXACT SUR 'Coût ABONNEMENT raison sociale org' ---
-                    col_org_sewan = None
-                    if 'Coût ABONNEMENT raison sociale org' in df_artis.columns:
-                        col_org_sewan = 'Coût ABONNEMENT raison sociale org'
-                    else:
-                        for c in df_artis.columns:
-                            c_str = str(c).strip().lower()
-                            if 'raison' in c_str and 'org' in c_str:
-                                col_org_sewan = c
-                                break
-                    
+                    # --- FILTRAGE STRICT SUR 'Coût ABONNEMENT raison sociale org' = SEWAN ---
+                    col_org_sewan = next((c for c in df_artis.columns if 'raison' in str(c).lower() and 'org' in str(c).lower()), None)
+                    if not col_org_sewan:
+                        col_org_sewan = next((c for c in df_artis.columns if 'fourn' in str(c).lower()), None)
+                        
                     if col_org_sewan:
                         df_artis = df_artis[df_artis[col_org_sewan].astype(str).str.contains('SEWAN', case=False, na=False)].copy()
 
@@ -181,9 +175,9 @@ with onglet_ht:
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
                     df_artis_abonn = df_artis_abonn[~df_artis_abonn['Code_Article_ERP'].str.endswith('-F')].copy()
 
-                    # Prix Unitaire ERP
+                    # Montant Facturé Direct ERP (Sans sur-multiplication)
                     col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis_abonn.columns else df_artis.columns[1]
-                    df_artis_abonn['PU_ERP'] = pd.to_numeric(df_artis_abonn[col_m_artis], errors='coerce').fillna(0.0)
+                    df_artis_abonn['Montant_ERP_Total'] = pd.to_numeric(df_artis_abonn[col_m_artis], errors='coerce').fillna(0.0).round(2)
                     
                     df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip()
                     df_artis_abonn['Name_Client_Clean'] = df_artis_abonn['Raison sociale client'].apply(clean_string_fuzzy)
@@ -198,13 +192,7 @@ with onglet_ht:
                     df_artis_abonn['Libelle_RFC_Clean'] = df_artis_abonn['Libellé RFC'].apply(extract_product_from_rfc)
 
                     # Quantité ERP via Colonne FA (Abonnement Nombre)
-                    col_qte_fa = None
-                    for c in df_artis_abonn.columns:
-                        c_str = str(c).strip()
-                        if 'Abonnement Nombre' in c_str or 'nt Nombre' in c_str or c_str.endswith('Nombre'):
-                            col_qte_fa = c
-                            break
-                    
+                    col_qte_fa = next((c for c in df_artis_abonn.columns if 'Abonnement Nombre' in str(c) or 'nt Nombre' in str(c) or str(c).endswith('Nombre')), None)
                     if col_qte_fa:
                         df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn[col_qte_fa], errors='coerce').fillna(1.0)
                     elif len(df_artis_abonn.columns) >= 147:
@@ -212,8 +200,7 @@ with onglet_ht:
                     else:
                         df_artis_abonn['Quantite_ERP'] = 1.0
 
-                    # Montant Total ERP = Quantité ERP * PU ERP
-                    df_artis_abonn['Montant_ERP_Total'] = (df_artis_abonn['Quantite_ERP'] * df_artis_abonn['PU_ERP']).round(2)
+                    df_artis_abonn['PU_ERP'] = (df_artis_abonn['Montant_ERP_Total'] / df_artis_abonn['Quantite_ERP'].replace(0, 1)).round(2)
 
                     lignes_fourn = []
                     for annexe in annexes_csv:
@@ -304,7 +291,7 @@ with onglet_ht:
                         Annexe_Source=('Annexe_Source', lambda x: ', '.join(set(x)))
                     )
 
-                    # 1. RAPPROCHEMENT PRINCIPAL
+                    # 1. RAPPROCHEMENT PRINCIPAL (SANS DUPLICATION DE LIGNES ERP)
                     df_recon_1 = pd.merge(
                         df_artis_abonn, 
                         df_fourn, 
