@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Regex Colonne R & Calcul PU x Qte FA)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Contrôle Temporalité Colonne FF & Extraction Tiers Col R)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -70,6 +70,32 @@ def extract_code_client_avance(row_dict):
                 
     return ""
 
+def analyser_temporalite_ff(date_val):
+    """
+    Audit de la date de dernier achat (Colonne FF).
+    Pour un audit d'Octobre 2026, la récurrence normale d'achat est Septembre 2026 (01/09/2026).
+    """
+    if pd.isna(date_val) or str(date_val).strip() in ['', 'nan']:
+        return "⚠️ Date Dernier Achat Absente"
+    try:
+        dt = pd.to_datetime(date_val, dayfirst=True, errors='coerce')
+        if pd.isna(dt):
+            return "⚠️ Format Date Invalide"
+        
+        annee, mois = dt.year, dt.month
+        
+        if annee == 2026 and mois == 9:
+            return "🟢 Cycle Récurrent Conforme (Sept 2026)"
+        elif annee == 2026 and mois < 9:
+            nb_m = 9 - mois
+            return f"🚨 Retard Génération ERP ({nb_m} mois de retard - Ex: {dt.strftime('%B')})"
+        elif annee < 2026:
+            return "🔴 Blocage Historique Achat (> 1 an)"
+        else:
+            return "ℹ️ Facturation Anticipée / Prorata"
+    except Exception:
+        return "ℹ️ Analyse Temporelle Inconnue"
+
 def lire_csv_securise(fichier):
     for enc in ['latin1', 'iso-8859-1', 'cp1252', 'utf-8']:
         try:
@@ -80,7 +106,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Résolution Colonne R)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Contrôle Périodes FF)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -147,9 +173,9 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC PARSING PARFAIT DES TIERS DANS LA COLONNE R ---
+# --- ONGLET 2 : ANALYSE HT AVEC CONTRÔLE DE TEMPORALITÉ COLONNE FF ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Extraction Code Client Regex dans Colonne R)")
+    st.subheader("Rapprochement Financier HT & Contrôle de Temporalité (Colonne FF)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
@@ -194,6 +220,7 @@ with onglet_ht:
 
                     df_artis_abonn['Libelle_RFC_Clean'] = df_artis_abonn['Libellé RFC'].apply(extract_product_from_rfc)
 
+                    # Quantité ERP via Colonne FA ("Abonnement Nombre")
                     col_qte_fa = next((c for c in df_artis_abonn.columns if 'Abonnement Nombre' in str(c) or 'nt Nombre' in str(c) or str(c).endswith('Nombre')), None)
                     if col_qte_fa:
                         df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn[col_qte_fa], errors='coerce').fillna(1.0)
@@ -204,6 +231,16 @@ with onglet_ht:
 
                     # CALCUL EXPLICITE : MONTANT TOTAL ERP = QUANTITÉ FA x PU IW
                     df_artis_abonn['Montant_Total_ERP'] = (df_artis_abonn['Quantite_ERP'] * df_artis_abonn['PU_ERP']).round(2)
+
+                    # AUDIT TEMPOREL SUR LA COLONNE FF (Abonnement Date dern achat)
+                    col_ff = next((c for c in df_artis_abonn.columns if 'dern' in str(c).lower() and 'achat' in str(c).lower()), None)
+                    if not col_ff and len(df_artis_abonn.columns) >= 162:
+                        col_ff = df_artis_abonn.columns[161]
+                    
+                    if col_ff:
+                        df_artis_abonn['Audit_Temporalite_FF'] = df_artis_abonn[col_ff].apply(analyser_temporalite_ff)
+                    else:
+                        df_artis_abonn['Audit_Temporalite_FF'] = "Non vérifié"
 
                     df_artis_abonn['Occurence_ERP'] = df_artis_abonn.groupby(['Code_Client_Str', 'Code_Article_ERP', 'Param_Key']).cumcount()
                     df_artis_abonn['Occurence_Fallback_ERP'] = df_artis_abonn.groupby(['Code_Client_Str', 'Code_Article_ERP', 'Libelle_RFC_Clean']).cumcount()
@@ -413,7 +450,7 @@ with onglet_ht:
                     cols_export_ht = [
                         'Code client', 'Raison sociale client', 'Code SSC', 'Code RFC', 'Libellé RFC', 
                         'Code_Article_ERP', 'Produit', 'Quantite_ERP', 'Quantite_Sewan', 
-                        'PU_ERP', 'Montant_Total_ERP', 'Montant_Sewan', 'Ecart_HT', 'Diagnostic_RAF', 'Annexe_Source'
+                        'PU_ERP', 'Montant_Total_ERP', 'Montant_Sewan', 'Ecart_HT', 'Diagnostic_RAF', 'Audit_Temporalite_FF', 'Annexe_Source'
                     ]
                     for c in cols_export_ht:
                         if c not in df_recon.columns:
