@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Analyse Physique des Colonnes AH & AL)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Simulation Octobre Exacte — Colonnes AH & AL)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -63,7 +63,7 @@ def extract_code_client_avance(row_dict):
                 return m.group(1).upper()
     return ""
 
-def analyser_temporalite_ah_blinde(date_val, annee_ref=2026, mois_ref=10):
+def analyser_temporalite_ah_exact(date_val, annee_ref=2026, mois_ref=10):
     if pd.isna(date_val) or str(date_val).strip() in ['', 'nan', 'None', 'NaT']:
         return "⚠️ Date Absente"
     try:
@@ -97,7 +97,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Analyse Physique Colonnes AH & AL)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Simulation Octobre Exacte)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -107,13 +107,15 @@ with onglet_tva:
             with st.spinner("Analyse des factures PDF Sewan et vérification des RFC ERP..."):
                 try:
                     df_artis = pd.read_excel(fichier_artis, sheet_name=0)
-                    col_art_artis = 'Code Article' if 'Code Article' in df_artis.columns else df_artis.columns[30] if len(df_artis.columns) >= 31 else df_artis.columns[0]
-                    df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
-                    df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
+                    
+                    # Colonne Article exacte (Col AE / Index 30 ou 'Code Article')
+                    col_art_exact = 'Code Article' if 'Code Article' in df_artis.columns else df_artis.columns[30] if len(df_artis.columns) >= 31 else df_artis.columns[0]
+                    df_artis_abonn = df_artis.dropna(subset=[col_art_exact]).copy()
+                    df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_exact].apply(isoler_ref_article)
                     
                     def harmoniser_tva_artis_exact(row):
-                        gtva = str(row.get('Coût ABONNEMENT Gestion TVA', row.get('Gestion TVA', '')))
-                        ttva = str(row.get('Coût ABONNEMENT Taux TVA', row.get('Taux TVA', '')))
+                        gtva = str(row.get('Gestion TVA', row.get('Code TVA', '')))
+                        ttva = str(row.get('Taux TVA', ''))
                         if 'STD' in gtva or 'Standard' in gtva or '20' in ttva or '20.00' in ttva:
                             return 'S (20%)'
                         return 'APST (0%)'
@@ -142,11 +144,11 @@ with onglet_tva:
                     df_errors_tva = df_merged_tva[df_merged_tva['TVA_Artis'] != df_merged_tva['TVA_Sewan']].copy()
                     df_errors_tva['Diagnostic_RAF'] = "🚨 Divergence TVA"
                     
-                    col_cli_name_tva = 'Client' if 'Client' in df_errors_tva.columns else df_errors_tva.columns[4]
-                    if col_cli_name_tva in df_errors_tva.columns:
-                        df_errors_tva[col_cli_name_tva] = df_errors_tva[col_cli_name_tva].astype(str).str.slice(0, 20)
+                    col_cli_disp_name = 'Client' if 'Client' in df_errors_tva.columns else df_errors_tva.columns[4]
+                    if col_cli_disp_name in df_errors_tva.columns:
+                        df_errors_tva[col_cli_disp_name] = df_errors_tva[col_cli_disp_name].astype(str).str.slice(0, 20)
                         
-                    cols_tva_export = ['Code client', col_cli_name_tva, 'Code SSC', 'Code RFC', 'Libellé RFC', 'Code_Article_ERP', 'TVA_Artis', 'TVA_Sewan', 'Diagnostic_RAF']
+                    cols_tva_export = ['Code client', col_cli_disp_name, 'Code SSC', 'Code RFC', 'Libellé RFC', 'Code_Article_ERP', 'TVA_Artis', 'TVA_Sewan', 'Diagnostic_RAF']
                     for c in cols_tva_export:
                         if c not in df_errors_tva.columns:
                             df_errors_tva[c] = "Non renseigné"
@@ -165,9 +167,9 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT PHYSIQUE COLONNE AH ET AL ---
+# --- ONGLET 2 : ANALYSE HT PHYSIQUE COLONNE AH (33) & AL (37) ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT & Contrôle Temporel (Index Physique Col. AH & AL)")
+    st.subheader("Rapprochement Financier HT & Contrôle Temporel (Simulation Octobre Exacte)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
@@ -204,21 +206,21 @@ with onglet_ht:
                                     if m:
                                         client_map[m.group(1).lower()] = artis_code
 
-                    # LECTURE DE LA FEUILLE 0 DIRECTE DE L'EXCEL
+                    # LECTURE DE LA SIMULATION
                     df_artis = pd.read_excel(fichier_artis, sheet_name=0)
 
-                    # 🎯 DÉTERMINATION PAR INTITULÉ OU PAR INDEX DE COLONNE EXCEL
-                    col_al_name = 'Montant HT' if 'Montant HT' in df_artis.columns else df_artis.columns[37] if len(df_artis.columns) >= 38 else df_artis.columns[-1]
-                    col_ah_name = 'Début période facturation' if 'Début période facturation' in df_artis.columns else df_artis.columns[33] if len(df_artis.columns) >= 34 else df_artis.columns[0]
-                    col_art_name = 'Code Article' if 'Code Article' in df_artis.columns else df_artis.columns[30] if len(df_artis.columns) >= 31 else df_artis.columns[0]
-                    col_pu_name = 'Prix Unitaire' if 'Prix Unitaire' in df_artis.columns else df_artis.columns[36] if len(df_artis.columns) >= 37 else df_artis.columns[1]
-                    col_qte_name = 'Quantite' if 'Quantite' in df_artis.columns else df_artis.columns[35] if len(df_artis.columns) >= 36 else df_artis.columns[2]
+                    # IDENTIFICATION STRUCTURELLE DES COLONNES DE LA SIMULATION
+                    col_art_name = 'Code Article' if 'Code Article' in df_artis.columns else df_artis.columns[30]
+                    col_ah_name = 'Début période facturation' if 'Début période facturation' in df_artis.columns else df_artis.columns[33]
+                    col_qte_name = 'Quantite' if 'Quantite' in df_artis.columns else df_artis.columns[35]
+                    col_pu_name = 'Prix Unitaire' if 'Prix Unitaire' in df_artis.columns else df_artis.columns[36]
+                    col_al_name = 'Montant HT' if 'Montant HT' in df_artis.columns else df_artis.columns[37]
 
-                    # 1. TOTAL ABSOLU BRUT SUR LA COLONNE AL (29 144.51 € GUARANTEE)
+                    # 🎯 1. CALCUL DU TOTAL ABSOLU SUR LA COLONNE AL (29 144,51 € GUARANTEE)
                     total_simulation_artis_absolu = pd.to_numeric(df_artis[col_al_name], errors='coerce').fillna(0.0).sum()
 
-                    # 2. TEMPORALITÉ ABSOLUE SUR LA COLONNE AH (3778 LIGNES GUARANTEE)
-                    df_artis['Audit_Temporalite_FF'] = df_artis[col_ah_name].apply(lambda d: analyser_temporalite_ah_blinde(d, annee_ref, mois_ref))
+                    # 🎯 2. ANALYSE TEMPORELLE ABSOLUE SUR LA COLONNE AH (3778 LIGNES GUARANTEE)
+                    df_artis['Audit_Temporalite_FF'] = df_artis[col_ah_name].apply(lambda d: analyser_temporalite_ah_exact(d, annee_ref, mois_ref))
                     stats_temp = df_artis['Audit_Temporalite_FF'].value_counts()
                     nb_conformes_ff = sum(v for k, v in stats_temp.items() if 'Conforme' in k)
                     nb_regul_echu_ff = sum(v for k, v in stats_temp.items() if 'Régularisation' in k)
@@ -226,7 +228,7 @@ with onglet_ht:
                     nb_retards_ff = sum(v for k, v in stats_temp.items() if 'Retard' in k)
 
                     # Préparation de la table pour le rapprochement
-                    df_artis_abonn = df_artis.copy()
+                    df_artis_abonn = df_artis.dropna(subset=[col_art_name]).copy()
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_name].apply(isoler_ref_article)
                     df_artis_abonn['Montant_Total_ERP'] = pd.to_numeric(df_artis_abonn[col_al_name], errors='coerce').fillna(0.0).round(2)
                     df_artis_abonn['PU_ERP'] = pd.to_numeric(df_artis_abonn[col_pu_name], errors='coerce').fillna(0.0)
