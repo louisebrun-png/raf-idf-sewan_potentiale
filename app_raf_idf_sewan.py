@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Calcul Temporalité Post-Réconciliation)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Calcul Temporalité Colonne AH Fixé)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -107,7 +107,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Calcul Temporalité Post-Merge)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Calcul Temporalité Colonne AH)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -175,15 +175,15 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC CALCUL TEMPOREL POST-MERGE ---
+# --- ONGLET 2 : ANALYSE HT AVEC CALCUL TEMPOREL RE-VERROUILLÉ ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT & Contrôle Temporel (Calcul Post-Merge)")
+    st.subheader("Rapprochement Financier HT & Contrôle Temporel (Colonne AH Garanties)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
             with st.spinner(f"Traitement haute précision sur {nb_annexes} annexes CSV..."):
                 try:
-                    # MOIS DE RÉFÉRENCE FACTURE SEWAN (10/2026)
+                    # MOIS DE RÉFÉRENCE FACTURE SEWAN (DÉFAUT 10/2026 OU EXTRACTION PDF)
                     annee_ref, mois_ref = 2026, 10
                     if factures_pdf:
                         try:
@@ -252,9 +252,9 @@ with onglet_ht:
                     # CALCUL EXPLICITE : MONTANT TOTAL ERP = QUANTITÉ (AJ) x PU (AK)
                     df_artis_abonn['Montant_Total_ERP'] = (df_artis_abonn['Quantite_ERP'] * df_artis_abonn['PU_ERP']).round(2)
 
-                    # ISOLATION DU CHAMP DE DATE DE DÉBUT (COLONNE AH)
+                    # CAPTURE UNIQUE DE LA COLONNE AH (Début période facturation)
                     col_ah_exact = 'Début période facturation' if 'Début période facturation' in df_artis_abonn.columns else (df_artis_abonn.columns[33] if len(df_artis_abonn.columns) >= 34 else df_artis_abonn.columns[0])
-                    df_artis_abonn['Date_Debut_Periode_Raw'] = df_artis_abonn[col_ah_exact]
+                    df_artis_abonn['Date_Debut_AH_ERP'] = df_artis_abonn[col_ah_exact]
 
                     df_artis_abonn['Occurence_ERP'] = df_artis_abonn.groupby(['Code_Client_Str', 'Code_Article_ERP', 'Param_Key']).cumcount()
                     df_artis_abonn['Occurence_Fallback_ERP'] = df_artis_abonn.groupby(['Code_Client_Str', 'Code_Article_ERP', 'Libelle_RFC_Clean']).cumcount()
@@ -404,8 +404,15 @@ with onglet_ht:
 
                     df_recon['Diagnostic_RAF'] = df_recon.apply(qualifier_ht_exact, axis=1)
 
-                    # CALCUL DE LA TEMPORALITÉ EFFECTUÉ DIRECTEMENT SUR LA TABLE FINALE RECONCILIÉE
-                    df_recon['Audit_Temporalite_FF'] = df_recon['Date_Debut_Periode_Raw'].apply(lambda d: analyser_temporalite_colonne_ah_blinde(d, annee_ref, mois_ref))
+                    # RECUPÉRATION SÉCURISÉE DE LA COLONNE DE DATE DÉBUT AH
+                    col_date_ah_final = next((c for c in df_recon.columns if 'Date_Debut_AH_ERP' in c), None)
+                    if not col_date_ah_final:
+                        col_date_ah_final = next((c for c in df_recon.columns if 'Début période' in c or 'période facturation' in c), None)
+                    
+                    if col_date_ah_final:
+                        df_recon['Audit_Temporalite_FF'] = df_recon[col_date_ah_final].apply(lambda d: analyser_temporalite_colonne_ah_blinde(d, annee_ref, mois_ref))
+                    else:
+                        df_recon['Audit_Temporalite_FF'] = "Non vérifié"
 
                     if 'Code_Client_Resolu' in df_recon.columns:
                         df_recon['Code client'] = df_recon['Code client'].fillna(df_recon['Code_Client_Resolu'])
