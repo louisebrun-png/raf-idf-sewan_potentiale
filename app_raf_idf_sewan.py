@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Alignement Précis Produit Col F == Libellé RFC ERP)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Quantités Colonne FA & Parsing Concaténation //)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -35,6 +35,10 @@ def clean_string_fuzzy(s):
 def extract_param_key_strict(text):
     if not isinstance(text, str) or pd.isna(text):
         return ""
+    # Si présence du séparateur '//', isoler la partie droite (Param1)
+    if '//' in str(text):
+        text = str(text).split('//')[-1]
+    
     digits = re.sub(r'\D', '', str(text))
     if len(digits) >= 9:
         return digits[-9:]
@@ -59,7 +63,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Correction Colonne Produit)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Correction FA & Parsing //)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -126,13 +130,13 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC EXTRACTION EXACTE COLONNE F PRODUIT ---
+# --- ONGLET 2 : ANALYSE HT AVEC LECTURE COLONNE FA & PARSING LIBELLÉ RFC // ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Alignement Colonne F Produit == Libellé RFC ERP)")
+    st.subheader("Rapprochement Financier HT (Lecture Colonne FA & Parsing Concaténation //)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Analyse et alignement strict sur {nb_annexes} annexes CSV..."):
+            with st.spinner(f"Traitement haute précision sur {nb_annexes} annexes CSV..."):
                 try:
                     # 1. Table de correspondance Tiers
                     client_map = {}
@@ -173,13 +177,28 @@ with onglet_ht:
                     df_artis_abonn['Montant_ERP'] = df_artis_abonn[col_m_artis].fillna(0.0)
                     df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip()
                     df_artis_abonn['Name_Client_Clean'] = df_artis_abonn['Raison sociale client'].apply(clean_string_fuzzy)
+                    
+                    # Extraction stricte de ParamKey depuis le Libellé RFC ERP (partie après '//' si présent)
                     df_artis_abonn['Param_Key'] = df_artis_abonn['Libellé RFC'].apply(extract_param_key_strict)
-                    df_artis_abonn['Libelle_RFC_Clean'] = df_artis_abonn['Libellé RFC'].apply(clean_string_fuzzy)
+                    
+                    # Extraction du Produit ERP (partie avant '//' si présent, sinon Libellé RFC nettoyé)
+                    def extract_product_from_rfc(rfc):
+                        if not isinstance(rfc, str) or pd.isna(rfc):
+                            return ""
+                        part_left = str(rfc).split('//')[0].strip() if '//' in str(rfc) else str(rfc).strip()
+                        return clean_string_fuzzy(part_left)
 
-                    # Lecture de la Colonne FA d'Artis ERP (Nombre d'unités vendues)
-                    col_qte_fa = next((c for c in df_artis_abonn.columns if 'ABONNEMENT' in c and 'Nombre' in c), None)
+                    df_artis_abonn['Libelle_RFC_Clean'] = df_artis_abonn['Libellé RFC'].apply(extract_product_from_rfc)
+
+                    # --- LECTURE ULTRA-STRICTE DE LA COLONNE FA (Saisie réelle des Quantités ERP) ---
+                    col_qte_fa = None
+                    for col_name in df_artis_abonn.columns:
+                        col_str = str(col_name).strip()
+                        if 'Nombre' in col_str or 'nt Nombre' in col_str or col_str.endswith('Nombre'):
+                            col_qte_fa = col_name
+                            break
                     if not col_qte_fa:
-                        col_qte_fa = next((c for c in df_artis_abonn.columns if any(k in c.lower() for k in ['nb bien', 'quantité', 'nb_bien', 'qte'])), None)
+                        col_qte_fa = next((c for c in df_artis_abonn.columns if any(k in c.lower() for k in ['quantité', 'quantite', 'qte', 'nb bien'])), None)
                     
                     if col_qte_fa:
                         df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn[col_qte_fa], errors='coerce').fillna(1.0)
@@ -197,7 +216,6 @@ with onglet_ht:
                         idx_p1 = next((i for i, c in enumerate(cols) if 'param1' in c), -1)
                         idx_p2 = next((i for i, c in enumerate(cols) if 'param2' in c), -1)
                         
-                        # CIBLAGE STRICT DE LA COLONNE F "PRODUIT" (En excluant Famille de produit)
                         idx_prod = next((i for i, c in enumerate(cols) if c == 'produit' or (('produit' in c or 'libellé' in c) and 'famille' not in c and 'code' not in c)), -1)
                         if idx_prod == -1:
                             idx_prod = next((i for i, c in enumerate(cols) if 'produit' in c and 'famille' not in c), -1)
@@ -235,7 +253,6 @@ with onglet_ht:
                             p2_val = str(row[col_param2]) if col_param2 else ""
                             prod_val = str(row[col_produit]).strip() if col_produit and pd.notna(row[col_produit]) else ""
                             
-                            # RESOLUTION TIERS MULTI-COLONNES : Réf Client ➔ Nom ➔ Param1 ➔ Param2
                             res_code = ""
                             for test_val in [c1_str, c2_str, p1_val, p2_val]:
                                 if test_val.lower() in client_map:
@@ -260,7 +277,7 @@ with onglet_ht:
                                 'Code_Client_Resolu': res_code if res_code else "10",
                                 'Name_Sewan_Clean': clean_string_fuzzy(cli_raw),
                                 'Code_Article_ERP': ref,
-                                'Produit': prod_val, # NOM EXACT DEMANDÉ DANS LE REPORTING FINAL !
+                                'Produit': prod_val,
                                 'Produit_Sewan_Clean': clean_string_fuzzy(prod_val),
                                 'Param_Key': param_key,
                                 'Montant_Sewan': m_ht,
@@ -286,7 +303,7 @@ with onglet_ht:
                         how='outer'
                     )
 
-                    # 2. FILET DE SÉCURITÉ ULTIME : CLIENT 10 / AFIDF-10 / FALLBACK SUR LIBELLÉ RFC == PRODUIT (COL. F)
+                    # 2. FILET DE SÉCURITÉ : CLIENT 10 / AFIDF-10 / FALLBACK SUR LIBELLÉ RFC (PRODUIT) == PRODUIT SEWAN
                     mask_c10_orphelin = (
                         df_recon_1['Montant_Sewan'].isna() | df_recon_1['Montant_ERP'].isna()
                     ) & (
@@ -302,7 +319,6 @@ with onglet_ht:
                         
                         df_sewan_c10_unmatched = df_fourn[df_fourn['Code_Client_Resolu'] == '10']
                         
-                        # MATCHING D'ÉQUIVALENCE EXACTE ENTRE LIBELLÉ RFC ERP ET PRODUIT SEWAN (COL. F)
                         df_recon_fallback = pd.merge(
                             df_erp_c10_unmatched,
                             df_sewan_c10_unmatched,
@@ -402,7 +418,6 @@ with onglet_ht:
                     if 'Raison sociale client' in df_recon.columns:
                         df_recon['Raison sociale client'] = df_recon['Raison sociale client'].astype(str).str.slice(0, 20)
                         
-                    # COLONNE "Produit" INCLUSE CONFORMÉMENT À TES CONSIGNES
                     cols_export_ht = [
                         'Code client', 'Raison sociale client', 'Code SSC', 'Code RFC', 'Libellé RFC', 
                         'Code_Article_ERP', 'Produit', 'Quantite_ERP', 'Quantite_Sewan', 
