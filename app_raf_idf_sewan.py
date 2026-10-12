@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Contrôle Temporalité Colonne FF & Extraction Tiers Col R)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Synthèse Flash Temporalité FF & Extraction Tiers Col R)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -173,7 +173,7 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC CONTRÔLE DE TEMPORALITÉ COLONNE FF ---
+# --- ONGLET 2 : ANALYSE HT AVEC SYNTHÈSE FLASH DE TEMPORALITÉ EN HAUT ---
 with onglet_ht:
     st.subheader("Rapprochement Financier HT & Contrôle de Temporalité (Colonne FF)")
     if fichier_artis and annexes_csv:
@@ -399,6 +399,22 @@ with onglet_ht:
                     tot_simulation_artis_reel = df_recon['Montant_Total_ERP'].sum()
                     tot_fournisseurs_reel = df_recon['Montant_Sewan'].sum()
                     ecart_global_reel = tot_simulation_artis_reel - tot_fournisseurs_reel
+
+                    # --- BANNIÈRE ALERTE TEMPORALITÉ FACTURATION (COLONNE FF) ---
+                    st.markdown("### ⏳ Contrôle de Temporalité ERP (Périodes de Facturation Colonne FF)")
+                    nb_conformes_ff = (df_recon['Audit_Temporalite_FF'].astype(str).str.contains('Conforme', na=False)).sum()
+                    nb_anticipees_ff = (df_recon['Audit_Temporalite_FF'].astype(str).str.contains('Anticipée', na=False)).sum()
+                    nb_retards_ff = (df_recon['Audit_Temporalite_FF'].astype(str).str.contains('Retard', na=False)).sum()
+
+                    f1, f2, f3 = st.columns(3)
+                    f1.metric("🟢 Cycles Récurrents Conformes", f"{nb_conformes_ff} lignes", delta="01/09/2026 (M-1)", delta_color="normal")
+                    f2.metric("ℹ️ Facturations Anticipées / Proratas", f"{nb_anticipees_ff} lignes", delta=">= 01/10/2026", delta_color="off")
+                    if nb_retards_ff > 0:
+                        f3.metric("🚨 RETARDS / OUBLIS DE GÉNÉRATION ERP", f"{nb_retards_ff} LIGNES ❗", delta="Action Correction Noémie", delta_color="inverse")
+                    else:
+                        f3.metric("🟢 Retards de Génération ERP", "0 ligne", delta="Aucun blocage", delta_color="normal")
+
+                    st.markdown("---")
 
                     # --- SYNTHÈSE EXÉCUTIVE METRIQUES ---
                     st.markdown("### 📋 Synthèse des Factures Fournisseurs (Abonnements HT)")
