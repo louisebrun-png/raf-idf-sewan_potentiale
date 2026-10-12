@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Filtre Strict Fournisseur Sewan Colonne JN)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Résolution Colonne JN SEWAN Infaillible)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -62,7 +62,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Filtre Sewan JN)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Filtre JN SEWAN Stricte)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -129,13 +129,13 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC FILTRE STRICT SEWAN (COLONNE JN) ---
+# --- ONGLET 2 : ANALYSE HT AVEC RECHERCHE INFAILLIBLE DE LA COLONNE JN ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Filtre Strict Fournisseur Sewan Colonne JN)")
+    st.subheader("Rapprochement Financier HT (Filtrage Colonne JN SEWAN Robustifié)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Traitement sur {nb_annexes} annexes CSV..."):
+            with st.spinner(f"Analyse en cours sur {nb_annexes} annexes CSV..."):
                 try:
                     # 1. Table de correspondance Tiers
                     client_map = {}
@@ -162,25 +162,41 @@ with onglet_ht:
 
                     df_artis = pd.read_excel(fichier_artis)
                     
-                    # --- FILTRAGE STRICT SUR LA COLONNE JN (Raison sociale fournisseur = SEWAN) ---
-                    col_jn = None
-                    for c in df_artis.columns:
-                        c_clean = str(c).strip().lower()
-                        if 'raison soc' in c_clean and 'fourn' in c_clean:
-                            col_jn = c
-                            break
-                    if not col_jn and len(df_artis.columns) >= 274:
-                        col_jn = df_artis.columns[273]
-                        
-                    if col_jn:
-                        df_artis = df_artis[df_artis[col_jn].astype(str).str.contains('SEWAN', case=False, na=False)].copy()
+                    # --- RECHERCHE INFAILLIBLE DE LA COLONNE JN (RAISON SOCIALE FOURNISSEUR) ---
+                    col_jn_target = None
+                    
+                    # Stratégie A : Position absolue colonne JN (274e colonne = index 273)
+                    if len(df_artis.columns) >= 274:
+                        cand_col = df_artis.columns[273]
+                        if df_artis[cand_col].astype(str).str.contains('SEWAN', case=False, na=False).any():
+                            col_jn_target = cand_col
+
+                    # Stratégie B : Recherche par mots-clés si la position a bougé
+                    if not col_jn_target:
+                        for c in df_artis.columns:
+                            c_str = str(c).strip().lower()
+                            if ('raison' in c_str and 'fourn' in c_str) or ('soc' in c_str and 'fourn' in c_str):
+                                if df_artis[c].astype(str).str.contains('SEWAN', case=False, na=False).any():
+                                    col_jn_target = c
+                                    break
+                                    
+                    # Stratégie C : Balayage global de secours si l'entête est tronqué
+                    if not col_jn_target:
+                        for c in df_artis.columns:
+                            if df_artis[c].astype(str).str.upper().str.strip().eq('SEWAN').sum() > 10:
+                                col_jn_target = c
+                                break
+
+                    # Application du filtre strict SEWAN sur JN
+                    if col_jn_target:
+                        df_artis = df_artis[df_artis[col_jn_target].astype(str).str.upper().str.contains('SEWAN', na=False)].copy()
 
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
                     df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
                     df_artis_abonn = df_artis_abonn[~df_artis_abonn['Code_Article_ERP'].str.endswith('-F')].copy()
 
-                    # Prix Unitaire ERP
+                    # PU ERP
                     col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis_abonn.columns else df_artis.columns[1]
                     df_artis_abonn['PU_ERP'] = pd.to_numeric(df_artis_abonn[col_m_artis], errors='coerce').fillna(0.0)
                     
