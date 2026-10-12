@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Analyse Stricte Colonne AH : Début Période Facturation)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Parsing Date Blindé Colonne AH)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -70,20 +70,22 @@ def extract_code_client_avance(row_dict):
                 
     return ""
 
-def analyser_temporalite_colonne_ah(date_val, annee_ref, mois_ref):
+def analyser_temporalite_colonne_ah_blinde(date_val, annee_ref=2026, mois_ref=10):
     """
-    Audit dynamique ciblant explicitement la COLONNE AH (Début période facturation).
-    - Mois M (ex: Octobre 2026) : 🟢 Cycle Récurrent Conforme (A échoir)
-    - Mois M-1 (ex: Septembre 2026) : ℹ️ Régularisation / Prorata Échu
-    - Mois > M (ex: Novembre 2026) : ℹ️ Facturation Anticipée / Futur
-    - Mois < M-1 (ex: Août 2026 ou antérieur) : 🚨 Retard de Facturation ERP
+    Parsing haute sécurité de la date (Colonne AH - Début période facturation).
+    Gère les dates sous formes de string, Timestamp, datetime ou réels Excel.
     """
-    if pd.isna(date_val) or str(date_val).strip() in ['', 'nan']:
+    if pd.isna(date_val) or str(date_val).strip() in ['', 'nan', 'None', 'NaT']:
         return "⚠️ Date Début Période Absente"
     try:
+        # Conversion robuste avec pd.to_datetime
         dt = pd.to_datetime(date_val, dayfirst=True, errors='coerce')
         if pd.isna(dt):
-            return "⚠️ Format Date Invalide"
+            # Tentative de nettoyage si format textuel avec espaces/heures
+            str_clean = str(date_val).split(' ')[0].strip()
+            dt = pd.to_datetime(str_clean, dayfirst=True, errors='coerce')
+            if pd.isna(dt):
+                return "⚠️ Format Date Invalide"
         
         diff_mois = (dt.year - annee_ref) * 12 + (dt.month - mois_ref)
         
@@ -108,7 +110,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Analyse Colonne AH)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Parsing Date Blindé Colonne AH)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -118,13 +120,13 @@ with onglet_tva:
             with st.spinner("Analyse des factures PDF Sewan et vérification des RFC ERP..."):
                 try:
                     df_artis = pd.read_excel(fichier_artis)
-                    col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
+                    col_art_artis = 'Code Article' if 'Code Article' in df_artis.columns else ('Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0])
                     df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
                     
                     def harmoniser_tva_artis_exact(row):
-                        gtva = str(row.get('Coût ABONNEMENT Gestion TVA', ''))
-                        ttva = str(row.get('Coût ABONNEMENT Taux TVA', ''))
+                        gtva = str(row.get('Coût ABONNEMENT Gestion TVA', row.get('Gestion TVA', '')))
+                        ttva = str(row.get('Coût ABONNEMENT Taux TVA', row.get('Taux TVA', '')))
                         if 'STD' in gtva or 'Standard' in gtva or '20' in ttva or '20.00' in ttva:
                             return 'S (20%)'
                         return 'APST (0%)'
@@ -153,10 +155,11 @@ with onglet_tva:
                     df_errors_tva = df_merged_tva[df_merged_tva['TVA_Artis'] != df_merged_tva['TVA_Sewan']].copy()
                     df_errors_tva['Diagnostic_RAF'] = "🚨 Divergence TVA"
                     
-                    if 'Raison sociale client' in df_errors_tva.columns:
-                        df_errors_tva['Raison sociale client'] = df_errors_tva['Raison sociale client'].astype(str).str.slice(0, 20)
+                    col_cli_name_tva = 'Client' if 'Client' in df_errors_tva.columns else 'Raison sociale client'
+                    if col_cli_name_tva in df_errors_tva.columns:
+                        df_errors_tva[col_cli_name_tva] = df_errors_tva[col_cli_name_tva].astype(str).str.slice(0, 20)
                         
-                    cols_tva_export = ['Code client', 'Raison sociale client', 'Code SSC', 'Code RFC', 'Libellé RFC', 'Code_Article_ERP', 'TVA_Artis', 'TVA_Sewan', 'Diagnostic_RAF']
+                    cols_tva_export = ['Code client', col_cli_name_tva, 'Code SSC', 'Code RFC', 'Libellé RFC', 'Code_Article_ERP', 'TVA_Artis', 'TVA_Sewan', 'Diagnostic_RAF']
                     for c in cols_tva_export:
                         if c not in df_errors_tva.columns:
                             df_errors_tva[c] = "Non renseigné"
@@ -175,15 +178,15 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC LECTURE STRICTE DE LA COLONNE AH ---
+# --- ONGLET 2 : ANALYSE HT AVEC PARSING BLINDÉ DATES COLONNE AH ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT & Contrôle Temporel (Lecture Stricte Colonne AH)")
+    st.subheader("Rapprochement Financier HT & Contrôle Temporel (Parsing Blindé Colonne AH)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
             with st.spinner(f"Traitement haute précision sur {nb_annexes} annexes CSV..."):
                 try:
-                    # MOIS DE RÉFÉRENCE FACTURE SEWAN (DÉTECTION AUTOMATIQUE OU DÉFAUT 10/2026)
+                    # MOIS DE RÉFÉRENCE FACTURE SEWAN (PAR DÉFAUT 10/2026 OU EXTRACTION FACTURE)
                     annee_ref, mois_ref = 2026, 10
                     if factures_pdf:
                         try:
@@ -222,7 +225,7 @@ with onglet_ht:
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
                     df_artis_abonn = df_artis_abonn[~df_artis_abonn['Code_Article_ERP'].str.endswith('-F')].copy()
 
-                    # Prix Unitaire HT
+                    # Prix Unitaire HT (Colonne AK / "Prix Unitaire")
                     col_pu_artis = 'Prix Unitaire' if 'Prix Unitaire' in df_artis_abonn.columns else ('Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis_abonn.columns else df_artis.columns[1])
                     df_artis_abonn['PU_ERP'] = pd.to_numeric(df_artis_abonn[col_pu_artis], errors='coerce').fillna(0.0)
                     
@@ -249,14 +252,20 @@ with onglet_ht:
                     else:
                         df_artis_abonn['Quantite_ERP'] = 1.0
 
-                    # CALCUL EXPLICITE : MONTANT TOTAL ERP = QUANTITÉ x PU
+                    # CALCUL EXPLICITE : MONTANT TOTAL ERP = QUANTITÉ (AJ) x PU (AK)
                     df_artis_abonn['Montant_Total_ERP'] = (df_artis_abonn['Quantite_ERP'] * df_artis_abonn['PU_ERP']).round(2)
 
-                    # AUDIT TEMPOREL CIBLANT LA COLONNE AH ("Début période facturation")
-                    col_ah_exact = 'Début période facturation' if 'Début période facturation' in df_artis_abonn.columns else next((c for c in df_artis_abonn.columns if 'début' in str(c).lower() and 'période' in str(c).lower()), None)
+                    # RECHERCHE DE LA COLONNE AH ("Début période facturation")
+                    col_ah_exact = None
+                    if 'Début période facturation' in df_artis_abonn.columns:
+                        col_ah_exact = 'Début période facturation'
+                    elif len(df_artis_abonn.columns) >= 34:
+                        col_ah_exact = df_artis_abonn.columns[33] # Index 33 = Colonne AH
+                    else:
+                        col_ah_exact = next((c for c in df_artis_abonn.columns if 'début' in str(c).lower() and 'période' in str(c).lower()), None)
                     
                     if col_ah_exact:
-                        df_artis_abonn['Audit_Temporalite_FF'] = df_artis_abonn[col_ah_exact].apply(lambda d: analyser_temporalite_colonne_ah(d, annee_ref, mois_ref))
+                        df_artis_abonn['Audit_Temporalite_FF'] = df_artis_abonn[col_ah_exact].apply(lambda d: analyser_temporalite_colonne_ah_blinde(d, annee_ref, mois_ref))
                     else:
                         df_artis_abonn['Audit_Temporalite_FF'] = "Non vérifié"
 
@@ -481,11 +490,12 @@ with onglet_ht:
                     st.markdown("---")
                     st.markdown("### 🔍 Tableau Détaillé des Lignes d'Abonnements")
 
-                    if 'Raison sociale client' in df_recon.columns:
-                        df_recon['Raison sociale client'] = df_recon['Raison sociale client'].astype(str).str.slice(0, 20)
+                    col_cli_disp = 'Client' if 'Client' in df_recon.columns else 'Raison sociale client'
+                    if col_cli_disp in df_recon.columns:
+                        df_recon[col_cli_disp] = df_recon[col_cli_disp].astype(str).str.slice(0, 20)
                         
                     cols_export_ht = [
-                        'Code client', 'Raison sociale client', 'Code SSC', 'Code RFC', 'Libellé RFC', 
+                        'Code client', col_cli_disp, 'Code SSC', 'Code RFC', 'Libellé RFC', 
                         'Code_Article_ERP', 'Produit', 'Quantite_ERP', 'Quantite_Sewan', 
                         'PU_ERP', 'Montant_Total_ERP', 'Montant_Sewan', 'Ecart_HT', 'Diagnostic_RAF', 'Audit_Temporalite_FF', 'Annexe_Source'
                     ]
