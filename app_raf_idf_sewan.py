@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Calcul PU x Quantité FA & Appariement Ligne à Ligne)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Regex Colonne R & Calcul PU x Qte FA)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -46,11 +46,29 @@ def extract_param_key_strict(text):
         return m_id.group(1).lower()
     return clean_string_fuzzy(text)
 
-def extract_code_from_string(text):
-    if not isinstance(text, str) or pd.isna(text):
-        return ""
-    m = re.search(r'(sk\d{4}|to_cl\d+|nm\d+|ns_\d+|\d{5,6})', str(text).lower())
-    return m.group(1).upper() if m else ""
+def extract_code_client_avance(row_dict):
+    """
+    Extrait le code client (ex: TO_CL00129) même s'il est noyé dans une chaîne
+    complexe en Colonne R (Nom client Niveau 2).
+    """
+    pattern = r'\b((?:NS|TO|SK|NM)(?:_CL)?\d{2,6})\b'
+    
+    champs_a_tester = [
+        str(row_dict.get('nom client niveau 2', '')), # Colonne R
+        str(row_dict.get('ref client niveau 2', '')), # Colonne S
+        str(row_dict.get('client/revendeur direct (niv. 1)', '')), # Colonne O
+        str(row_dict.get('réf. client/revendeur direct (niv. 1)', '')),
+        str(row_dict.get('param1', '')),
+        str(row_dict.get('param2', ''))
+    ]
+    
+    for val in champs_a_tester:
+        if val and val.lower() != 'nan':
+            m = re.search(pattern, val, re.IGNORECASE)
+            if m:
+                return m.group(1).upper()
+                
+    return ""
 
 def lire_csv_securise(fichier):
     for enc in ['latin1', 'iso-8859-1', 'cp1252', 'utf-8']:
@@ -62,7 +80,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Calcul PU x Qte FA & Granularité)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Résolution Colonne R)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -129,9 +147,9 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC CALCUL MULTIPLICATIF PU x QTE FA & GRANULARITÉ ---
+# --- ONGLET 2 : ANALYSE HT AVEC PARSING PARFAIT DES TIERS DANS LA COLONNE R ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Montant Total ERP = Quantité FA x PU IW)")
+    st.subheader("Rapprochement Financier HT (Extraction Code Client Regex dans Colonne R)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
@@ -161,7 +179,6 @@ with onglet_ht:
                     df_artis_abonn['Code_Article_ERP'] = df_artis_abonn[col_art_artis].apply(isoler_ref_article)
                     df_artis_abonn = df_artis_abonn[~df_artis_abonn['Code_Article_ERP'].str.endswith('-F')].copy()
 
-                    # Prix Unitaire HT (Colonne IW : "Coût ABONNEMENT facturé")
                     col_m_artis = 'Coût ABONNEMENT facturé' if 'Coût ABONNEMENT facturé' in df_artis_abonn.columns else df_artis.columns[1]
                     df_artis_abonn['PU_ERP'] = pd.to_numeric(df_artis_abonn[col_m_artis], errors='coerce').fillna(0.0)
                     
@@ -177,7 +194,6 @@ with onglet_ht:
 
                     df_artis_abonn['Libelle_RFC_Clean'] = df_artis_abonn['Libellé RFC'].apply(extract_product_from_rfc)
 
-                    # Quantité ERP via Colonne FA ("Abonnement Nombre")
                     col_qte_fa = next((c for c in df_artis_abonn.columns if 'Abonnement Nombre' in str(c) or 'nt Nombre' in str(c) or str(c).endswith('Nombre')), None)
                     if col_qte_fa:
                         df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn[col_qte_fa], errors='coerce').fillna(1.0)
@@ -186,42 +202,30 @@ with onglet_ht:
                     else:
                         df_artis_abonn['Quantite_ERP'] = 1.0
 
-                    # CALCUL MULTIPLICATIF VALIDE : MONTANT TOTAL ERP = QUANTITÉ FA x PU IW
+                    # CALCUL EXPLICITE : MONTANT TOTAL ERP = QUANTITÉ FA x PU IW
                     df_artis_abonn['Montant_Total_ERP'] = (df_artis_abonn['Quantite_ERP'] * df_artis_abonn['PU_ERP']).round(2)
 
-                    # Index d'occurrence pour apparier ligne à ligne les règles répétées
                     df_artis_abonn['Occurence_ERP'] = df_artis_abonn.groupby(['Code_Client_Str', 'Code_Article_ERP', 'Param_Key']).cumcount()
                     df_artis_abonn['Occurence_Fallback_ERP'] = df_artis_abonn.groupby(['Code_Client_Str', 'Code_Article_ERP', 'Libelle_RFC_Clean']).cumcount()
 
                     lignes_fourn = []
                     for annexe in annexes_csv:
                         df_annexe = lire_csv_securise(annexe) if annexe.name.endswith('.csv') else pd.read_excel(annexe)
-                        cols = [str(c).lower().strip() for c in df_annexe.columns]
+                        cols_lower = {str(c).lower().strip(): c for c in df_annexe.columns}
                         
-                        idx_ref = next((i for i, c in enumerate(cols) if any(k in c for k in ['code produit', 'code_article', 'ref', 'code'])), 0)
-                        idx_m = next((i for i, c in enumerate(cols) if any(k in c for k in ["prix d'achat", 'prix', 'montant', 'ht'])), 1)
-                        idx_qte = next((i for i, c in enumerate(cols) if any(k in c for k in ['quantité', 'quantite', 'qte'])), -1)
-                        idx_p1 = next((i for i, c in enumerate(cols) if 'param1' in c), -1)
-                        idx_p2 = next((i for i, c in enumerate(cols) if 'param2' in c), -1)
-                        idx_id_val = next((i for i, c in enumerate(cols) if 'id interne' in c or 'valorisation' in c), -1)
+                        col_ref = next((v for k, v in cols_lower.items() if any(x in k for x in ['code produit', 'code_article', 'ref', 'code'])), df_annexe.columns[0])
+                        col_montant = next((v for k, v in cols_lower.items() if any(x in k for x in ["prix d'achat", 'prix', 'montant', 'ht'])), df_annexe.columns[1])
+                        col_qte = next((v for k, v in cols_lower.items() if any(x in k for x in ['quantité', 'quantite', 'qte'])), None)
+                        col_param1 = next((v for k, v in cols_lower.items() if 'param1' in k), None)
+                        col_param2 = next((v for k, v in cols_lower.items() if 'param2' in k), None)
+                        col_id_val = next((v for k, v in cols_lower.items() if 'id interne' in k or 'valorisation' in k), None)
+                        col_produit = next((v for k, v in cols_lower.items() if k == 'produit' or (('produit' in k or 'libellé' in k) and 'famille' not in k and 'code' not in k)), None)
                         
-                        idx_prod = next((i for i, c in enumerate(cols) if c == 'produit' or (('produit' in c or 'libellé' in c) and 'famille' not in c and 'code' not in c)), -1)
-                        if idx_prod == -1:
-                            idx_prod = next((i for i, c in enumerate(cols) if 'produit' in c and 'famille' not in c), -1)
+                        col_cli1 = next((v for k, v in cols_lower.items() if 'client/revendeur direct (niv. 1)' in k or 'client/revendeur' in k), None)
+                        col_cli2 = next((v for k, v in cols_lower.items() if 'nom client niveau 2' in k or 'nom client' in k), None)
+                        col_ref_cli2 = next((v for k, v in cols_lower.items() if 'ref client niveau 2' in k), None)
+                        col_ref_cli1 = next((v for k, v in cols_lower.items() if 'réf. client/revendeur direct (niv. 1)' in k), None)
 
-                        idx_cli1 = next((i for i, c in enumerate(cols) if 'client/revendeur direct (niv. 1)' in c or 'client/revendeur' in c), -1)
-                        idx_cli2 = next((i for i, c in enumerate(cols) if 'nom client niveau 2' in c or 'nom client' in c), -1)
-                        
-                        col_ref = df_annexe.columns[idx_ref]
-                        col_montant = df_annexe.columns[idx_m]
-                        col_qte = df_annexe.columns[idx_qte] if idx_qte != -1 else None
-                        col_param1 = df_annexe.columns[idx_p1] if idx_p1 != -1 else None
-                        col_param2 = df_annexe.columns[idx_p2] if idx_p2 != -1 else None
-                        col_cli1 = df_annexe.columns[idx_cli1] if idx_cli1 != -1 else None
-                        col_cli2 = df_annexe.columns[idx_cli2] if idx_cli2 != -1 else None
-                        col_produit = df_annexe.columns[idx_prod] if idx_prod != -1 else None
-                        col_id_val = df_annexe.columns[idx_id_val] if idx_id_val != -1 else None
-                        
                         for _, row in df_annexe.iterrows():
                             ref = isoler_ref_article(str(row[col_ref]))
                             if ref.endswith('-F'):
@@ -233,35 +237,33 @@ with onglet_ht:
                                 m_ht = 0.0
                                 
                             try:
-                                q_sewan = float(str(row[col_qte]).replace(',', '.').replace(' ', '')) if col_qte else 1.0
+                                q_sewan = float(str(row[col_qte]).replace(',', '.').replace(' ', '')) if col_qte and pd.notna(row[col_qte]) else 1.0
                             except ValueError:
                                 q_sewan = 1.0
                             
-                            c1_str = str(row[col_cli1]).strip() if col_cli1 and pd.notna(row[col_cli1]) else ""
-                            c2_str = str(row[col_cli2]).strip() if col_cli2 and pd.notna(row[col_cli2]) else ""
-                            p1_val = str(row[col_param1]) if col_param1 else ""
-                            p2_val = str(row[col_param2]) if col_param2 else ""
+                            p1_val = str(row[col_param1]) if col_param1 and pd.notna(row[col_param1]) else ""
+                            p2_val = str(row[col_param2]) if col_param2 and pd.notna(row[col_param2]) else ""
                             prod_val = str(row[col_produit]).strip() if col_produit and pd.notna(row[col_produit]) else ""
                             id_val_str = str(row[col_id_val]).strip() if col_id_val and pd.notna(row[col_id_val]) else ""
                             
-                            res_code = ""
-                            for test_val in [c1_str, c2_str, p1_val, p2_val]:
-                                if test_val.lower() in client_map:
-                                    res_code = client_map[test_val.lower()]
-                                    break
-                                token = extract_code_from_string(test_val)
-                                if token and token.lower() in client_map:
-                                    res_code = client_map[token.lower()]
-                                    break
-                                    
+                            row_dict_lower = {
+                                'nom client niveau 2': str(row[col_cli2]) if col_cli2 and pd.notna(row[col_cli2]) else "",
+                                'ref client niveau 2': str(row[col_ref_cli2]) if col_ref_cli2 and pd.notna(row[col_ref_cli2]) else "",
+                                'client/revendeur direct (niv. 1)': str(row[col_cli1]) if col_cli1 and pd.notna(row[col_cli1]) else "",
+                                'réf. client/revendeur direct (niv. 1)': str(row[col_ref_cli1]) if col_ref_cli1 and pd.notna(row[col_ref_cli1]) else "",
+                                'param1': p1_val,
+                                'param2': p2_val
+                            }
+                            
+                            res_code = extract_code_client_avance(row_dict_lower)
+                            
                             if not res_code:
-                                for test_val in [c1_str, c2_str, p1_val, p2_val]:
-                                    token = extract_code_from_string(test_val)
-                                    if token:
-                                        res_code = token
+                                for test_val in [row_dict_lower['nom client niveau 2'], row_dict_lower['client/revendeur direct (niv. 1)'], p1_val, p2_val]:
+                                    if test_val.lower() in client_map:
+                                        res_code = client_map[test_val.lower()]
                                         break
                                         
-                            cli_raw = c1_str if c1_str else (c2_str if c2_str else p1_val)
+                            cli_raw = row_dict_lower['nom client niveau 2'] if row_dict_lower['nom client niveau 2'] else row_dict_lower['client/revendeur direct (niv. 1)']
                             param_key = extract_param_key_strict(p1_val)
                             
                             lignes_fourn.append({
@@ -282,7 +284,7 @@ with onglet_ht:
                     df_fourn['Occurence_Sewan'] = df_fourn.groupby(['Code_Client_Resolu', 'Code_Article_ERP', 'Param_Key']).cumcount()
                     df_fourn['Occurence_Fallback_Sewan'] = df_fourn.groupby(['Code_Client_Resolu', 'Code_Article_ERP', 'Produit_Sewan_Clean']).cumcount()
 
-                    # 1. RAPPROCHEMENT LIGNE À LIGNE GRANULAIRE (1 SEWAN = 1 ERP)
+                    # 1. RAPPROCHEMENT LIGNE À LIGNE GRANULAIRE
                     df_recon_1 = pd.merge(
                         df_artis_abonn, 
                         df_fourn, 
@@ -336,7 +338,6 @@ with onglet_ht:
                     df_recon['Quantite_Sewan'] = df_recon['Quantite_Sewan'].fillna(0.0)
                     df_recon['PU_ERP'] = df_recon['PU_ERP'].fillna(0.0).round(2)
                     
-                    # ÉCART PARFAIT CALCULÉ SUR LE MONTANT TOTAL HT RECALCULÉ
                     df_recon['Ecart_HT'] = (df_recon['Montant_Total_ERP'] - df_recon['Montant_Sewan']).round(2)
                     
                     def qualifier_ht_exact(row):
