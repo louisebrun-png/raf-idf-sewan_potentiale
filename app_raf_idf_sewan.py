@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Synthèse Flash Temporalité FF & Extraction Tiers Col R)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Contrôle Temporel Dynamique / Date Facture Sewan)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -70,29 +70,32 @@ def extract_code_client_avance(row_dict):
                 
     return ""
 
-def analyser_temporalite_ff(date_val):
+def analyser_temporalite_dynamique(date_val, annee_ref, mois_ref):
     """
-    Audit de la date de dernier achat (Colonne FF).
-    Pour un audit d'Octobre 2026, la récurrence normale d'achat est Septembre 2026 (01/09/2026).
+    Audit dynamique de la date ERP selon la date de facture Sewan (Mois M).
+    - Mois M (ex: Octobre 2026) : 🟢 Cycle Récurrent Conforme (A échoir)
+    - Mois M-1 (ex: Septembre 2026) : ℹ️ Régularisation / Prorata Échu
+    - Mois > M (ex: Novembre 2026) : ℹ️ Facturation Anticipée / Prorata Futur
+    - Mois < M-1 (ex: Août 2026 ou antérieur) : 🚨 Retard de Facturation ERP (À corriger)
     """
     if pd.isna(date_val) or str(date_val).strip() in ['', 'nan']:
-        return "⚠️ Date Dernier Achat Absente"
+        return "⚠️ Date Début Période Absente"
     try:
         dt = pd.to_datetime(date_val, dayfirst=True, errors='coerce')
         if pd.isna(dt):
             return "⚠️ Format Date Invalide"
         
-        annee, mois = dt.year, dt.month
+        # Calcul de la différence en mois
+        diff_mois = (dt.year - annee_ref) * 12 + (dt.month - mois_ref)
         
-        if annee == 2026 and mois == 9:
-            return "🟢 Cycle Récurrent Conforme (Sept 2026)"
-        elif annee == 2026 and mois < 9:
-            nb_m = 9 - mois
-            return f"🚨 Retard Génération ERP ({nb_m} mois de retard - Ex: {dt.strftime('%B')})"
-        elif annee < 2026:
-            return "🔴 Blocage Historique Achat (> 1 an)"
+        if diff_mois == 0:
+            return f"🟢 Cycle Récurrent Conforme ({dt.strftime('%m/%Y')})"
+        elif diff_mois == -1:
+            return f"ℹ️ Régularisation / Prorata Échu ({dt.strftime('%m/%Y')})"
+        elif diff_mois > 0:
+            return f"ℹ️ Facturation Anticipée / Futur ({dt.strftime('%m/%Y')})"
         else:
-            return "ℹ️ Facturation Anticipée / Prorata"
+            return f"🚨 Retard de Facturation ERP ({abs(diff_mois)} mois de retard - {dt.strftime('%m/%Y')})"
     except Exception:
         return "ℹ️ Analyse Temporelle Inconnue"
 
@@ -106,7 +109,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Contrôle Périodes FF)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Contrôle Périodes Dynamique)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -173,14 +176,29 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC SYNTHÈSE FLASH DE TEMPORALITÉ EN HAUT ---
+# --- ONGLET 2 : ANALYSE HT AVEC CONTRÔLE DE TEMPORALITÉ DYNAMIQUE ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT & Contrôle de Temporalité (Colonne FF)")
+    st.subheader("Rapprochement Financier HT & Contrôle de Temporalité Dynamique (Date Facture Sewan)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
             with st.spinner(f"Traitement sur {nb_annexes} annexes CSV..."):
                 try:
+                    # DÉTERMINATION DYNAMIQUE DU MOIS / ANNÉE DE RÉFÉRENCE SEWAN
+                    annee_ref, mois_ref = 2026, 10 # Valeurs par défaut
+                    if factures_pdf:
+                        try:
+                            for pdf in factures_pdf:
+                                reader = pypdf.PdfReader(pdf)
+                                text = reader.pages[0].extract_text() or ""
+                                m_date = re.search(r'Date\s*:\s*(\d{2})/(\d{2})/(\d{4})', text)
+                                if m_date:
+                                    mois_ref = int(m_date.group(2))
+                                    annee_ref = int(m_date.group(3))
+                                    break
+                        except Exception:
+                            pass
+
                     client_map = {}
                     if fichier_ref:
                         xls_ref = pd.ExcelFile(fichier_ref)
@@ -220,7 +238,6 @@ with onglet_ht:
 
                     df_artis_abonn['Libelle_RFC_Clean'] = df_artis_abonn['Libellé RFC'].apply(extract_product_from_rfc)
 
-                    # Quantité ERP via Colonne FA ("Abonnement Nombre")
                     col_qte_fa = next((c for c in df_artis_abonn.columns if 'Abonnement Nombre' in str(c) or 'nt Nombre' in str(c) or str(c).endswith('Nombre')), None)
                     if col_qte_fa:
                         df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn[col_qte_fa], errors='coerce').fillna(1.0)
@@ -232,13 +249,13 @@ with onglet_ht:
                     # CALCUL EXPLICITE : MONTANT TOTAL ERP = QUANTITÉ FA x PU IW
                     df_artis_abonn['Montant_Total_ERP'] = (df_artis_abonn['Quantite_ERP'] * df_artis_abonn['PU_ERP']).round(2)
 
-                    # AUDIT TEMPOREL SUR LA COLONNE FF (Abonnement Date dern achat)
-                    col_ff = next((c for c in df_artis_abonn.columns if 'dern' in str(c).lower() and 'achat' in str(c).lower()), None)
-                    if not col_ff and len(df_artis_abonn.columns) >= 162:
-                        col_ff = df_artis_abonn.columns[161]
+                    # AUDIT TEMPOREL DYNAMIQUE SUR 'Début période facturation' / COLONNE FF
+                    col_periode_debut = next((c for c in df_artis_abonn.columns if 'début' in str(c).lower() and 'période' in str(c).lower()), None)
+                    if not col_periode_debut:
+                        col_periode_debut = next((c for c in df_artis_abonn.columns if 'dern' in str(c).lower() and 'achat' in str(c).lower()), None)
                     
-                    if col_ff:
-                        df_artis_abonn['Audit_Temporalite_FF'] = df_artis_abonn[col_ff].apply(analyser_temporalite_ff)
+                    if col_periode_debut:
+                        df_artis_abonn['Audit_Temporalite_FF'] = df_artis_abonn[col_periode_debut].apply(lambda d: analyser_temporalite_dynamique(d, annee_ref, mois_ref))
                     else:
                         df_artis_abonn['Audit_Temporalite_FF'] = "Non vérifié"
 
@@ -400,19 +417,22 @@ with onglet_ht:
                     tot_fournisseurs_reel = df_recon['Montant_Sewan'].sum()
                     ecart_global_reel = tot_simulation_artis_reel - tot_fournisseurs_reel
 
-                    # --- BANNIÈRE ALERTE TEMPORALITÉ FACTURATION (COLONNE FF) ---
-                    st.markdown("### ⏳ Contrôle de Temporalité ERP (Périodes de Facturation Colonne FF)")
+                    # --- BANNIÈRE ALERTE TEMPORALITÉ FACTURATION DYNAMIQUE ---
+                    st.markdown(f"### ⏳ Contrôle de Temporalité ERP (Mois de Référence Facture Sewan : {mois_ref:02d}/{annee_ref})")
                     nb_conformes_ff = (df_recon['Audit_Temporalite_FF'].astype(str).str.contains('Conforme', na=False)).sum()
+                    nb_regul_echu_ff = (df_recon['Audit_Temporalite_FF'].astype(str).str.contains('Régularisation', na=False)).sum()
                     nb_anticipees_ff = (df_recon['Audit_Temporalite_FF'].astype(str).str.contains('Anticipée', na=False)).sum()
                     nb_retards_ff = (df_recon['Audit_Temporalite_FF'].astype(str).str.contains('Retard', na=False)).sum()
 
-                    f1, f2, f3 = st.columns(3)
-                    f1.metric("🟢 Cycles Récurrents Conformes", f"{nb_conformes_ff} lignes", delta="01/09/2026 (M-1)", delta_color="normal")
-                    f2.metric("ℹ️ Facturations Anticipées / Proratas", f"{nb_anticipees_ff} lignes", delta=">= 01/10/2026", delta_color="off")
+                    f1, f2, f3, f4 = st.columns(4)
+                    f1.metric("🟢 Cycles Récurrents Conformes", f"{nb_conformes_ff} lignes", delta=f"{mois_ref:02d}/{annee_ref} (A échoir)", delta_color="normal")
+                    f2.metric("ℹ️ Régularisations Échues", f"{nb_regul_echu_ff} lignes", delta=f"{((mois_ref-2)%12)+1:02d}/{annee_ref} (Échu)", delta_color="off")
+                    f3.metric("ℹ️ Facturations Anticipées", f"{nb_anticipees_ff} lignes", delta=f">{mois_ref:02d}/{annee_ref}", delta_color="off")
+                    
                     if nb_retards_ff > 0:
-                        f3.metric("🚨 RETARDS / OUBLIS DE GÉNÉRATION ERP", f"{nb_retards_ff} LIGNES ❗", delta="Action Correction Noémie", delta_color="inverse")
+                        f4.metric("🚨 RETARDS DE FACTURATION ERP", f"{nb_retards_ff} LIGNES ❗", delta="Action Correction Noémie", delta_color="inverse")
                     else:
-                        f3.metric("🟢 Retards de Génération ERP", "0 ligne", delta="Aucun blocage", delta_color="normal")
+                        f4.metric("🟢 Retards de Facturation ERP", "0 ligne", delta="Aucun blocage", delta_color="normal")
 
                     st.markdown("---")
 
