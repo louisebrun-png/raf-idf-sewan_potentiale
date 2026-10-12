@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Multiplication PU x Quantité & Détail HT Total)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Filtre Strict Fournisseur Sewan Colonne JN)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -62,7 +62,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Détail PU & Totaux)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Filtre Sewan JN)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -129,9 +129,9 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC DETAILS PU ET CALCUL DU TOTAL HT ERP ---
+# --- ONGLET 2 : ANALYSE HT AVEC FILTRE STRICT SEWAN (COLONNE JN) ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Détail PU & Calcul du Total HT ERP)")
+    st.subheader("Rapprochement Financier HT (Filtre Strict Fournisseur Sewan Colonne JN)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
@@ -162,10 +162,18 @@ with onglet_ht:
 
                     df_artis = pd.read_excel(fichier_artis)
                     
-                    # Filtre strict SEWAN sur le fournisseur ERP
-                    col_fourn_artis = next((c for c in df_artis.columns if 'ABONNEMENT' in c and ('fournisseur' in c.lower() or 'raison soc' in c.lower() or 'org' in c.lower())), None)
-                    if col_fourn_artis:
-                        df_artis = df_artis[df_artis[col_fourn_artis].astype(str).str.contains('SEWAN', case=False, na=False)].copy()
+                    # --- FILTRAGE STRICT SUR LA COLONNE JN (Raison sociale fournisseur = SEWAN) ---
+                    col_jn = None
+                    for c in df_artis.columns:
+                        c_clean = str(c).strip().lower()
+                        if 'raison soc' in c_clean and 'fourn' in c_clean:
+                            col_jn = c
+                            break
+                    if not col_jn and len(df_artis.columns) >= 274:
+                        col_jn = df_artis.columns[273]
+                        
+                    if col_jn:
+                        df_artis = df_artis[df_artis[col_jn].astype(str).str.contains('SEWAN', case=False, na=False)].copy()
 
                     col_art_artis = 'Coût ABONNEMENT article' if 'Coût ABONNEMENT article' in df_artis.columns else df_artis.columns[0]
                     df_artis_abonn = df_artis.dropna(subset=[col_art_artis]).copy()
@@ -203,7 +211,7 @@ with onglet_ht:
                     else:
                         df_artis_abonn['Quantite_ERP'] = 1.0
 
-                    # CALCUL REEL DU MONTANT TOTAL ERP = Quantité ERP * PU ERP
+                    # Montant Total ERP = Quantité ERP * PU ERP
                     df_artis_abonn['Montant_ERP_Total'] = (df_artis_abonn['Quantite_ERP'] * df_artis_abonn['PU_ERP']).round(2)
 
                     lignes_fourn = []
