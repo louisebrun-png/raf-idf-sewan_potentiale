@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Quantités Colonne FA & Parsing Concaténation //)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Correction Stricte Lecture Colonne FA)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -35,7 +35,6 @@ def clean_string_fuzzy(s):
 def extract_param_key_strict(text):
     if not isinstance(text, str) or pd.isna(text):
         return ""
-    # Si présence du séparateur '//', isoler la partie droite (Param1)
     if '//' in str(text):
         text = str(text).split('//')[-1]
     
@@ -63,7 +62,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Correction FA & Parsing //)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Lecture FA Intégrale)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -130,13 +129,13 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC LECTURE COLONNE FA & PARSING LIBELLÉ RFC // ---
+# --- ONGLET 2 : ANALYSE HT AVEC EXTRACTION COLONNE FA ET PARSING // ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT (Lecture Colonne FA & Parsing Concaténation //)")
+    st.subheader("Rapprochement Financier HT (Lecture Strict Colonne FA & Parsing //)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
-            with st.spinner(f"Traitement haute précision sur {nb_annexes} annexes CSV..."):
+            with st.spinner(f"Traitement sur {nb_annexes} annexes CSV..."):
                 try:
                     # 1. Table de correspondance Tiers
                     client_map = {}
@@ -178,10 +177,8 @@ with onglet_ht:
                     df_artis_abonn['Code_Client_Str'] = df_artis_abonn['Code client'].astype(str).str.strip()
                     df_artis_abonn['Name_Client_Clean'] = df_artis_abonn['Raison sociale client'].apply(clean_string_fuzzy)
                     
-                    # Extraction stricte de ParamKey depuis le Libellé RFC ERP (partie après '//' si présent)
                     df_artis_abonn['Param_Key'] = df_artis_abonn['Libellé RFC'].apply(extract_param_key_strict)
                     
-                    # Extraction du Produit ERP (partie avant '//' si présent, sinon Libellé RFC nettoyé)
                     def extract_product_from_rfc(rfc):
                         if not isinstance(rfc, str) or pd.isna(rfc):
                             return ""
@@ -190,18 +187,18 @@ with onglet_ht:
 
                     df_artis_abonn['Libelle_RFC_Clean'] = df_artis_abonn['Libellé RFC'].apply(extract_product_from_rfc)
 
-                    # --- LECTURE ULTRA-STRICTE DE LA COLONNE FA (Saisie réelle des Quantités ERP) ---
+                    # --- EXTRACTION STICTE DE LA COLONNE FA (Abonnement Nombre) ---
                     col_qte_fa = None
-                    for col_name in df_artis_abonn.columns:
-                        col_str = str(col_name).strip()
-                        if 'Nombre' in col_str or 'nt Nombre' in col_str or col_str.endswith('Nombre'):
-                            col_qte_fa = col_name
+                    for c in df_artis_abonn.columns:
+                        c_str = str(c).strip()
+                        if 'Abonnement Nombre' in c_str or 'nt Nombre' in c_str or c_str.endswith('Nombre'):
+                            col_qte_fa = c
                             break
-                    if not col_qte_fa:
-                        col_qte_fa = next((c for c in df_artis_abonn.columns if any(k in c.lower() for k in ['quantité', 'quantite', 'qte', 'nb bien'])), None)
                     
                     if col_qte_fa:
                         df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn[col_qte_fa], errors='coerce').fillna(1.0)
+                    elif len(df_artis_abonn.columns) >= 147:
+                        df_artis_abonn['Quantite_ERP'] = pd.to_numeric(df_artis_abonn.iloc[:, 146], errors='coerce').fillna(1.0)
                     else:
                         df_artis_abonn['Quantite_ERP'] = 1.0
 
@@ -294,7 +291,7 @@ with onglet_ht:
                         Annexe_Source=('Annexe_Source', lambda x: ', '.join(set(x)))
                     )
 
-                    # 1. RAPPROCHEMENT PRINCIPAL : Code Client + Code Article + ParamKey
+                    # 1. RAPPROCHEMENT PRINCIPAL
                     df_recon_1 = pd.merge(
                         df_artis_abonn, 
                         df_fourn, 
@@ -303,7 +300,7 @@ with onglet_ht:
                         how='outer'
                     )
 
-                    # 2. FILET DE SÉCURITÉ : CLIENT 10 / AFIDF-10 / FALLBACK SUR LIBELLÉ RFC (PRODUIT) == PRODUIT SEWAN
+                    # 2. FILET DE SÉCURITÉ : CLIENT 10 / AFIDF-10 / FALLBACK PRODUIT SEWAN == LIBELLÉ RFC ERP
                     mask_c10_orphelin = (
                         df_recon_1['Montant_Sewan'].isna() | df_recon_1['Montant_ERP'].isna()
                     ) & (
