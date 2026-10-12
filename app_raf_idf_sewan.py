@@ -12,7 +12,7 @@ import io
 st.set_page_config(page_title="Potentiale — RAF Koesio IDF", page_icon="💼", layout="wide")
 
 st.title("💼 Potentiale — Outil Interne RAF (Koesio IDF x Sewan)")
-st.caption("Audit Fiscal TVA & Rapprochement HT (Parsing Date Blindé Colonne AH)")
+st.caption("Audit Fiscal TVA & Rapprochement HT (Calcul Temporalité Post-Réconciliation)")
 
 # Sidebar - Importation des fichiers
 st.sidebar.header("📁 Importation des Documents")
@@ -73,19 +73,16 @@ def extract_code_client_avance(row_dict):
 def analyser_temporalite_colonne_ah_blinde(date_val, annee_ref=2026, mois_ref=10):
     """
     Parsing haute sécurité de la date (Colonne AH - Début période facturation).
-    Gère les dates sous formes de string, Timestamp, datetime ou réels Excel.
     """
     if pd.isna(date_val) or str(date_val).strip() in ['', 'nan', 'None', 'NaT']:
-        return "⚠️ Date Début Période Absente"
+        return "⚠️ Date Absente"
     try:
-        # Conversion robuste avec pd.to_datetime
         dt = pd.to_datetime(date_val, dayfirst=True, errors='coerce')
         if pd.isna(dt):
-            # Tentative de nettoyage si format textuel avec espaces/heures
             str_clean = str(date_val).split(' ')[0].strip()
             dt = pd.to_datetime(str_clean, dayfirst=True, errors='coerce')
             if pd.isna(dt):
-                return "⚠️ Format Date Invalide"
+                return "⚠️ Format Invalide"
         
         diff_mois = (dt.year - annee_ref) * 12 + (dt.month - mois_ref)
         
@@ -96,9 +93,9 @@ def analyser_temporalite_colonne_ah_blinde(date_val, annee_ref=2026, mois_ref=10
         elif diff_mois > 0:
             return f"ℹ️ Facturation Anticipée / Futur ({dt.strftime('%m/%Y')})"
         else:
-            return f"🚨 Retard de Facturation ERP ({abs(diff_mois)} mois de retard - {dt.strftime('%m/%Y')})"
+            return f"🚨 Retard de Facturation ERP ({abs(diff_mois)} mois - {dt.strftime('%m/%Y')})"
     except Exception:
-        return "ℹ️ Analyse Temporelle Inconnue"
+        return "ℹ️ Analyse Inconnue"
 
 def lire_csv_securise(fichier):
     for enc in ['latin1', 'iso-8859-1', 'cp1252', 'utf-8']:
@@ -110,7 +107,7 @@ def lire_csv_securise(fichier):
     fichier.seek(0)
     return pd.read_csv(fichier, sep=None, engine='python', encoding='utf-8', errors='ignore')
 
-onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Parsing Date Blindé Colonne AH)"])
+onglet_tva, onglet_ht = st.tabs(["🚨 1. Audit Écarts TVA (20% vs 0%)", "📊 2. Analyse Quantité & Prix HT (Calcul Temporalité Post-Merge)"])
 
 # --- ONGLET 1 : AUDIT TVA ---
 with onglet_tva:
@@ -178,15 +175,15 @@ with onglet_tva:
     else:
         st.info("👈 Veuillez charger la simulation Artis (.xlsx) et les factures PDF Sewan.")
 
-# --- ONGLET 2 : ANALYSE HT AVEC PARSING BLINDÉ DATES COLONNE AH ---
+# --- ONGLET 2 : ANALYSE HT AVEC CALCUL TEMPOREL POST-MERGE ---
 with onglet_ht:
-    st.subheader("Rapprochement Financier HT & Contrôle Temporel (Parsing Blindé Colonne AH)")
+    st.subheader("Rapprochement Financier HT & Contrôle Temporel (Calcul Post-Merge)")
     if fichier_artis and annexes_csv:
         nb_annexes = len(annexes_csv)
         if st.button("🚀 Lancer l'Analyse HT", type="primary", key="btn_ht"):
             with st.spinner(f"Traitement haute précision sur {nb_annexes} annexes CSV..."):
                 try:
-                    # MOIS DE RÉFÉRENCE FACTURE SEWAN (PAR DÉFAUT 10/2026 OU EXTRACTION FACTURE)
+                    # MOIS DE RÉFÉRENCE FACTURE SEWAN (10/2026)
                     annee_ref, mois_ref = 2026, 10
                     if factures_pdf:
                         try:
@@ -255,19 +252,9 @@ with onglet_ht:
                     # CALCUL EXPLICITE : MONTANT TOTAL ERP = QUANTITÉ (AJ) x PU (AK)
                     df_artis_abonn['Montant_Total_ERP'] = (df_artis_abonn['Quantite_ERP'] * df_artis_abonn['PU_ERP']).round(2)
 
-                    # RECHERCHE DE LA COLONNE AH ("Début période facturation")
-                    col_ah_exact = None
-                    if 'Début période facturation' in df_artis_abonn.columns:
-                        col_ah_exact = 'Début période facturation'
-                    elif len(df_artis_abonn.columns) >= 34:
-                        col_ah_exact = df_artis_abonn.columns[33] # Index 33 = Colonne AH
-                    else:
-                        col_ah_exact = next((c for c in df_artis_abonn.columns if 'début' in str(c).lower() and 'période' in str(c).lower()), None)
-                    
-                    if col_ah_exact:
-                        df_artis_abonn['Audit_Temporalite_FF'] = df_artis_abonn[col_ah_exact].apply(lambda d: analyser_temporalite_colonne_ah_blinde(d, annee_ref, mois_ref))
-                    else:
-                        df_artis_abonn['Audit_Temporalite_FF'] = "Non vérifié"
+                    # ISOLATION DU CHAMP DE DATE DE DÉBUT (COLONNE AH)
+                    col_ah_exact = 'Début période facturation' if 'Début période facturation' in df_artis_abonn.columns else (df_artis_abonn.columns[33] if len(df_artis_abonn.columns) >= 34 else df_artis_abonn.columns[0])
+                    df_artis_abonn['Date_Debut_Periode_Raw'] = df_artis_abonn[col_ah_exact]
 
                     df_artis_abonn['Occurence_ERP'] = df_artis_abonn.groupby(['Code_Client_Str', 'Code_Article_ERP', 'Param_Key']).cumcount()
                     df_artis_abonn['Occurence_Fallback_ERP'] = df_artis_abonn.groupby(['Code_Client_Str', 'Code_Article_ERP', 'Libelle_RFC_Clean']).cumcount()
@@ -417,10 +404,14 @@ with onglet_ht:
 
                     df_recon['Diagnostic_RAF'] = df_recon.apply(qualifier_ht_exact, axis=1)
 
+                    # CALCUL DE LA TEMPORALITÉ EFFECTUÉ DIRECTEMENT SUR LA TABLE FINALE RECONCILIÉE
+                    df_recon['Audit_Temporalite_FF'] = df_recon['Date_Debut_Periode_Raw'].apply(lambda d: analyser_temporalite_colonne_ah_blinde(d, annee_ref, mois_ref))
+
                     if 'Code_Client_Resolu' in df_recon.columns:
                         df_recon['Code client'] = df_recon['Code client'].fillna(df_recon['Code_Client_Resolu'])
                     if 'Client_Sewan_Raw' in df_recon.columns:
-                        df_recon['Raison sociale client'] = df_recon['Raison sociale client'].fillna(df_recon['Client_Sewan_Raw'])
+                        col_cli_disp = 'Client' if 'Client' in df_recon.columns else 'Raison sociale client'
+                        df_recon[col_cli_disp] = df_recon[col_cli_disp].fillna(df_recon['Client_Sewan_Raw'])
 
                     # CALCUL DYNAMIQUE DES TOTALS GLOBAUX
                     tot_simulation_artis_reel = df_recon['Montant_Total_ERP'].sum()
@@ -429,6 +420,7 @@ with onglet_ht:
 
                     # --- BANNIÈRE ALERTE TEMPORALITÉ DYNAMIQUE COLONNE AH ---
                     st.markdown(f"### ⏳ Contrôle de Temporalité ERP (Mois de Référence Facture Sewan : {mois_ref:02d}/{annee_ref})")
+                    
                     nb_conformes_ff = (df_recon['Audit_Temporalite_FF'].astype(str).str.contains('Conforme', na=False)).sum()
                     nb_regul_echu_ff = (df_recon['Audit_Temporalite_FF'].astype(str).str.contains('Régularisation', na=False)).sum()
                     nb_anticipees_ff = (df_recon['Audit_Temporalite_FF'].astype(str).str.contains('Anticipée', na=False)).sum()
